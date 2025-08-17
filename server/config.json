@@ -1,0 +1,34 @@
+{
+  "schedule": {
+    "mode": "weekly"
+  },
+  "include": {
+    "recentMovies": true,
+    "recentEpisodes": true,
+    "serverMetrics": false,
+    "ownerRecommendation": true
+  },
+  "lookbackDays": 7,
+  "ownerRecommendation": {
+    "plexItemId": "",
+    "note": ""
+  },
+  "recipients": [
+    {
+      "name": "Example Recipient",
+      "email": "you@example.com"
+    },
+    {
+      "name": "kunkmasterflex@gmail.com",
+      "email": "kunkmasterflex@gmail.com"
+    }
+  ],
+  "smtp": {
+    "host": "smtp.gmail.com",
+    "port": 587,
+    "mode": "starttls",
+    "user": "kunkmasterflex@gmail.com",
+    "pass": "nisg yirf enln hiwc",
+    "from": "Kunkflix <kunkmasterflex@gmail.com>"
+  }
+}

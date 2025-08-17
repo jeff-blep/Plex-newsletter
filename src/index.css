@@ -1,0 +1,6 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+/* (optional) your helpers */
+.poster { width:200px; height:300px; object-fit:cover; border-radius:12px; }
+.item img.poster { width:200px; height:300px; object-fit:cover; }
