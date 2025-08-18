@@ -22,3 +22,7 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# ignore stray configs
+/server/config.json
+/server/config/*.json

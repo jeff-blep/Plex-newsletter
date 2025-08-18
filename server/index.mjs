@@ -1,212 +1,220 @@
 // server/index.mjs
-// Minimal API server for Plex Newsletter (ESM)
-
 import express from "express";
 import cors from "cors";
-import fs from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { URL as NodeURL } from "node:url";
-import { fetch, Agent } from "undici";
+import fs from "fs/promises";
+import path from "path";
+import { fileURLToPath } from "url";
+import { getConfig } from "./lib/config.mjs";
+import tautulliRouter from "./routes/tautulli.mjs";
 
-// ---------- paths / config helpers ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const CONFIG_DIR = path.join(__dirname, "..", "config");
-const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-function ensureConfigDir() {
-  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  if (!fs.existsSync(CONFIG_PATH)) {
-    fs.writeFileSync(
-      CONFIG_PATH,
-      JSON.stringify(
-        {
-          schedule: { mode: "weekly" },
-          include: {
-            recentMovies: true,
-            recentEpisodes: true,
-            serverMetrics: false,
-            ownerRecommendation: true,
-          },
-          lookbackDays: 7,
-          ownerRecommendation: { plexItemId: "", note: "" },
-          recipients: [{ name: "Example Recipient", email: "you@example.com" }],
-          smtp: { host: "", port: 587, mode: "starttls", user: "", pass: "", from: "" },
-          tautulli: { url: "", apiKey: "" },
-          plex: { url: "", token: "", webBase: "", machineIdentifier: "", insecureTLS: true }, // 👈 allow LAN certs
-        },
-        null,
-        2
-      )
-    );
-  }
-}
-
-function readConfigRaw() {
-  ensureConfigDir();
-  try {
-    const txt = fs.readFileSync(CONFIG_PATH, "utf8");
-    return JSON.parse(txt);
-  } catch {
-    return {};
-  }
-}
-
-function writeConfigRaw(cfg) {
-  ensureConfigDir();
-  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
-}
-
-function deepMerge(base, partial) {
-  if (Array.isArray(partial)) return partial.slice();
-  if (partial && typeof partial === "object") {
-    const out = { ...(base || {}) };
-    for (const k of Object.keys(partial)) {
-      out[k] = deepMerge(base?.[k], partial[k]);
-    }
-    return out;
-  }
-  return partial;
-}
-
-function getConfig(maskSensitive = true) {
-  const cfg = readConfigRaw();
-  if (maskSensitive) {
-    const m = JSON.parse(JSON.stringify(cfg));
-    if (m?.smtp?.pass) m.smtp.pass = "********";
-    return m;
-  }
-  return cfg;
-}
-
-function saveConfig(partial) {
-  const current = readConfigRaw();
-  const next = deepMerge(current, partial || {});
-  writeConfigRaw(next);
-  return getConfig(true);
-}
-
-// ---------- app ----------
 const app = express();
-app.use(express.json({ limit: "2mb" }));
-app.use(cors({ origin: "http://localhost:5173" }));
+const PORT = process.env.PORT || 5174;
 
-// health
-app.get("/health", (_req, res) => res.json({ ok: true }));
+// Basic middleware
+app.use(
+  cors({
+    origin: "http://localhost:5173",
+    credentials: false,
+  })
+);
+app.use(express.json());
 
-// config get
-app.get("/config", (_req, res) => {
-  res.json({ ok: true, config: getConfig(true) });
-});
+// ---------- Utilities ----------
+const CONFIG_FILE = path.join(__dirname, "config", "config.json");
 
-// config post (partial update)
-app.post("/config", (req, res) => {
+async function loadConfig() {
+  // Prefer lib/config.mjs.getConfig so we stay consistent with your current setup
+  const cfg = await getConfig();
+  return cfg || {};
+}
+
+async function persistConfig(partial) {
+  // Merge with existing on-disk config.json (server/config/config.json).
+  // We do NOT rely on saveConfig from lib to avoid export mismatch.
+  let existing = {};
   try {
-    const updated = saveConfig(req.body || {});
-    res.json({ ok: true, config: updated });
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e?.message || String(e) });
-  }
-});
-
-// (stub) run now
-app.post("/run", (req, res) => {
-  const cfg = getConfig(false);
-  if (!cfg?.smtp?.host || !cfg?.smtp?.user || !cfg?.smtp?.pass || !cfg?.smtp?.from) {
-    return res
-      .status(400)
-      .json({ ok: false, error: "SMTP is not configured. Set host/user/pass/from in /config." });
-  }
-  res.json({ ok: true, sent: (cfg.recipients || []).map((r) => r.email) });
-});
-
-// ---------- Plex image proxy (force HTTP for LAN IPs to avoid TLS/SAN mismatch) ----------
-const laxAgent = new Agent({
-  connect: {
-    // tolerate self-signed / mismatched SANs if we still hit HTTPS
-    tls: { rejectUnauthorized: false },
-  },
-});
-
-// Use: <img src="/plex/image?u=<encoded full plex image url>" />
-app.get("/plex/image", async (req, res) => {
-  const u = req.query.u;
-  if (!u || typeof u !== "string") {
-    res.status(400).send("missing u");
-    return;
-  }
-
-  // helper: detect private/LAN hosts
-  function isPrivateHost(host) {
-    if (!host) return false;
-    const h = String(host).toLowerCase();
-    if (h === "localhost" || h === "127.0.0.1") return true;
-    if (h.startsWith("10.")) return true;
-    if (h.startsWith("192.168.")) return true;
-    if (h.startsWith("172.")) {
-      const n = parseInt(h.split(".")[1] || "0", 10);
-      if (n >= 16 && n <= 31) return true;
-    }
-    return false;
-  }
-
-  let target;
-  try {
-    const urlObj = new NodeURL(u);
-
-    // If user passed an https:// URL to a LAN IP/host, drop to http:// to avoid TLS SNI/cert mismatches.
-    if (urlObj.protocol === "https:" && isPrivateHost(urlObj.hostname)) {
-      urlObj.protocol = "http:";
-    }
-
-    target = urlObj.toString();
+    const raw = await fs.readFile(CONFIG_FILE, "utf8");
+    existing = JSON.parse(raw);
   } catch {
-    res.status(400).send("bad url");
-    return;
+    // file may not exist yet—ok
+    existing = {};
   }
 
+  // Deep-ish merge (shallow per top-level keys)
+  const next = { ...existing, ...partial };
+
+  await fs.mkdir(path.dirname(CONFIG_FILE), { recursive: true });
+  await fs.writeFile(CONFIG_FILE, JSON.stringify(next, null, 2));
+  return next;
+}
+
+function stripTrailingSlash(u) {
+  return String(u || "").replace(/\/$/, "");
+}
+
+// ---------- Health ----------
+app.get("/health", (_req, res) => {
+  res.json({ ok: true });
+});
+
+// ---------- Config ----------
+app.get("/config", async (_req, res) => {
   try {
-    const isHttps = target.startsWith("https://");
+    const cfg = await loadConfig();
+    res.json({ ok: true, config: cfg });
+  } catch (err) {
+    console.error("GET /config error:", err);
+    res.status(500).json({ ok: false, error: "Failed to load config" });
+  }
+});
 
-    const r = await fetch(target, {
-      headers: {
-        Accept: "image/*,*/*;q=0.8",
-        "User-Agent": "plex-newsletter-proxy/1.0",
-      },
-      redirect: "follow",
-      ...(isHttps ? { dispatcher: laxAgent } : {}),
-    });
+app.post("/config", async (req, res) => {
+  try {
+    const body = req.body || {};
+    const saved = await persistConfig(body);
+    // Re-read merged config via lib so the in-memory view aligns with the app
+    const merged = await loadConfig();
+    res.json({ ok: true, config: merged, saved });
+  } catch (err) {
+    console.error("POST /config error:", err);
+    res.status(500).json({ ok: false, error: "Failed to save config" });
+  }
+});
 
-    if (!r.ok) {
-      res.status(r.status).send(`upstream ${r.status}`);
+// ---------- Plex: image proxy (robust, SNI-proof) ----------
+app.get("/plex/image", async (req, res) => {
+  try {
+    const cfg = await loadConfig();
+    const plex = cfg.plex || {};
+
+    if (!plex.url) {
+      res.status(400).send("Plex not configured");
       return;
     }
 
-    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
-    const cl = r.headers.get("content-length");
-    if (cl) res.setHeader("Content-Length", cl);
-    res.setHeader("Cache-Control", "public, max-age=600");
+    // Accept ?path=/library/metadata/... (preferred) or legacy ?u=https://... (we’ll normalize)
+    let pathOnly = "";
+    const qPath = req.query.path;
+    const qU = req.query.u;
 
-    // stream to client
-    if (r.body && typeof r.body.pipe === "function") {
-      r.body.pipe(res);
+    if (typeof qPath === "string" && qPath.length > 0) {
+      pathOnly = qPath.startsWith("/") ? qPath : `/${qPath}`;
+    } else if (typeof qU === "string" && qU.length > 0) {
+      // Normalize any full URL to pathname+search and rebuild on our configured base
+      try {
+        const uObj = new URL(qU);
+        pathOnly = uObj.pathname + (uObj.search || "");
+      } catch {
+        res.status(400).send("Invalid 'u' parameter");
+        return;
+      }
     } else {
-      const buf = Buffer.from(await r.arrayBuffer());
-      res.end(buf);
+      res.status(400).send("Missing 'path' or 'u' query parameter");
+      return;
     }
-  } catch (e) {
-    console.error("plex/image proxy error:", e);
-    res.status(502).send("bad gateway");
+
+    const base = stripTrailingSlash(plex.url);
+    let upstream = `${base}${pathOnly}`;
+
+    // Ensure X-Plex-Token is present; if not, append from config
+    if (!/[?&]X-Plex-Token=/.test(upstream) && plex.token) {
+      upstream += (upstream.includes("?") ? "&" : "?") + `X-Plex-Token=${encodeURIComponent(plex.token)}`;
+    }
+
+    // Fetch bytes and return. Use arrayBuffer to avoid stream variations.
+    const r = await fetch(upstream);
+    if (!r.ok) {
+      console.error("plex/image upstream not ok:", r.status, upstream);
+      res.status(502).send("Bad Gateway");
+      return;
+    }
+
+    const ct = r.headers.get("content-type") || "image/jpeg";
+    res.setHeader("Cache-Control", "public, max-age=3600, immutable");
+    res.setHeader("Content-Type", ct);
+
+    const buf = Buffer.from(await r.arrayBuffer());
+    res.end(buf);
+  } catch (err) {
+    console.error("plex/image proxy error:", err);
+    res.status(502).send("Bad Gateway");
   }
 });
 
-// ---------- Tautulli routes ----------
-import { router as tautulliRouter } from "./routes/tautulli.mjs";
+// ---------- Plex: search ----------
+app.get("/plex/search", async (req, res) => {
+  try {
+    const q = String(req.query.q || "").trim();
+    const type = String(req.query.type || "").trim(); // "movie" | "show" (optional)
+    if (!q) {
+      res.status(400).json({ ok: false, error: "Missing q" });
+      return;
+    }
+
+    const cfg = await loadConfig();
+    const plex = cfg.plex || {};
+    if (!plex.url || !plex.token) {
+      res
+        .status(400)
+        .json({ ok: false, error: "Plex not configured (need plex.url and plex.token in server/config/config.json)." });
+      return;
+    }
+
+    const base = stripTrailingSlash(plex.url);
+
+    // Decide searchTypes
+    let searchTypes = ""; // empty -> Plex returns all hubs
+    if (type === "movie") searchTypes = "movies";
+    else if (type === "show" || type === "series") searchTypes = "tv";
+
+    const url = new URL(`${base}/hubs/search`);
+    url.searchParams.set("query", q);
+    if (searchTypes) url.searchParams.set("searchTypes", searchTypes);
+    url.searchParams.set("X-Plex-Token", plex.token);
+
+    const r = await fetch(url, {
+      headers: {
+        Accept: "application/json",
+      },
+    });
+
+    if (!r.ok) {
+      res.status(502).json({ ok: false, error: `Plex upstream error ${r.status}` });
+      return;
+    }
+
+    const data = await r.json().catch(() => ({}));
+    // Normalize items (Plex returns hubs[].Metadata[]).
+    const hubs = Array.isArray(data?.MediaContainer?.Hub) ? data.MediaContainer.Hub : [];
+    const results = [];
+    for (const hub of hubs) {
+      const items = Array.isArray(hub?.Metadata) ? hub.Metadata : [];
+      for (const it of items) {
+        results.push({
+          title: it.title,
+          type: it.type,
+          ratingKey: it.ratingKey,
+          thumb: it.thumb, // relative path like /library/metadata/xxx/thumb/...
+          year: it.year,
+          summary: it.summary,
+        });
+      }
+    }
+
+    res.json({ ok: true, count: results.length, results });
+  } catch (err) {
+    console.error("plex search error:", err);
+    res.status(500).json({ ok: false, error: "Search failed" });
+  }
+});
+
+// ---------- Tautulli ----------
 app.use("/tautulli", tautulliRouter);
 
-// ---------- start ----------
-const PORT = process.env.PORT || 5174;
+// ---------- Start ----------
 app.listen(PORT, () => {
-  console.log(`API server running on http://localhost:${PORT}`);
+  console.log(`Server listening on http://localhost:${PORT}`);
 });
