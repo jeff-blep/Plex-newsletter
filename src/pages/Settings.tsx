@@ -1,3 +1,4 @@
+// src/pages/Settings.tsx
 import React, { useEffect, useMemo, useRef, useState } from "react";
 import { getConfig, postConfig, runNow } from "../api";
 import TautulliStatsCard from "../components/TautulliStatsCard";
@@ -63,7 +64,7 @@ function cardHtml(title: string, bodyHtml: string) {
   </div>`;
 }
 
-// --- Placeholder menu entries: Only the six requested cards ---
+// --- Placeholder menu entries (with added “Recently added” items) ---
 const TEMPLATE_TOKENS: { key: string; label: string }[] = [
   { key: "{{CARD_MOST_WATCHED_MOVIES}}", label: "Most Watched Movies" },
   { key: "{{CARD_MOST_WATCHED_SHOWS}}", label: "Most Watched TV Shows" },
@@ -71,10 +72,11 @@ const TEMPLATE_TOKENS: { key: string; label: string }[] = [
   { key: "{{CARD_POPULAR_MOVIES}}", label: "Most Popular Movies" },
   { key: "{{CARD_POPULAR_SHOWS}}", label: "Most Popular TV Shows" },
   { key: "{{CARD_POPULAR_PLATFORMS}}", label: "Most Popular Streaming Platform" },
+  { key: "{{CARD_RECENT_MOVIES}}", label: "Recently added Movies" },
+  { key: "{{CARD_RECENT_EPISODES}}", label: "Recently added TV Episodes" },
   { key: "{{CARD_OWNER_RECOMMENDATION}}", label: "Owner Recommendation" },
 ];
 
-type IncludeKeys = "recentMovies" | "recentEpisodes" | "serverMetrics" | "ownerRecommendation";
 type ScheduleMode = "daily" | "weekly" | "custom";
 
 export default function SettingsPage() {
@@ -82,9 +84,13 @@ export default function SettingsPage() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  // template editor
   const [templateHtml, setTemplateHtml] = useState<string>("");
   const [templateSaving, setTemplateSaving] = useState(false);
   const editorRef = useRef<HTMLDivElement | null>(null);
+
+  // summary block for previewing certain placeholders
   const [homeSummary, setHomeSummary] = useState<any>(null);
   useEffect(() => {
     const days = (config?.lookbackDays || 7);
@@ -167,22 +173,19 @@ export default function SettingsPage() {
     next[index] = { name, email };
     save({ recipients: next });
   }
-  function toggleInclude(k: IncludeKeys, val: boolean) {
-    save({ include: { [k]: val } });
-  }
 
+  // formatting commands for the editor
   function exec(cmd: string, value?: string) {
     document.execCommand(cmd, false, value);
-    // sync state with current editor html
     const el = editorRef.current;
     if (el) setTemplateHtml(el.innerHTML);
   }
+
   async function insertTokenAtCaret(token: string) {
     const el = editorRef.current;
     if (!el) return;
     el.focus();
 
-    // Default: insert raw token text
     let htmlToInsert: string | null = null;
 
     try {
@@ -260,6 +263,19 @@ export default function SettingsPage() {
           htmlToInsert = cardHtml("Most Popular Streaming Platform", body);
           break;
         }
+
+        // New: Recently added (editor preview placeholder)
+        case "{{CARD_RECENT_MOVIES}}": {
+          const body = `<div style="opacity:.75">Preview • Recently added Movies will be inserted here when sending.</div>`;
+          htmlToInsert = cardHtml("Recently added Movies", body);
+          break;
+        }
+        case "{{CARD_RECENT_EPISODES}}": {
+          const body = `<div style="opacity:.75">Preview • Recently added TV Episodes will be inserted here when sending.</div>`;
+          htmlToInsert = cardHtml("Recently added TV Episodes", body);
+          break;
+        }
+
         case "{{CARD_OWNER_RECOMMENDATION}}": {
           const id = config?.ownerRecommendation?.plexItemId;
           const note = config?.ownerRecommendation?.note || "";
@@ -275,7 +291,6 @@ export default function SettingsPage() {
       htmlToInsert = token;
     }
 
-    // Insert HTML (or plain text as fallback)
     if (htmlToInsert) {
       document.execCommand("insertHTML", false, htmlToInsert);
     } else {
@@ -298,8 +313,9 @@ export default function SettingsPage() {
   function previewTemplate() {
     const w = window.open("", "_blank");
     if (!w) return alert("Popup blocked");
-    // wrap current HTML if it doesn't look like full doc
-    const html = templateHtml.trim().startsWith("<!doctype") ? templateHtml : `<!doctype html><html><head><meta charset="utf-8"><title>Preview</title></head><body>${templateHtml}</body></html>`;
+    const html = templateHtml.trim().startsWith("<!doctype")
+      ? templateHtml
+      : `<!doctype html><html><head><meta charset="utf-8"><title>Preview</title></head><body>${templateHtml}</body></html>`;
     w.document.open();
     w.document.write(html);
     w.document.close();
@@ -314,9 +330,7 @@ export default function SettingsPage() {
       if (plex?.serverId) localStorage.setItem("plexServerId", plex.serverId);
       if (plex?.token) localStorage.setItem("plex.token", plex.token);
       if (plex?.url) localStorage.setItem("plex.url", plex.url);
-    } catch {
-      // ignore
-    }
+    } catch { /* ignore */ }
   }, [config]);
 
   useEffect(() => {
@@ -341,9 +355,7 @@ export default function SettingsPage() {
       <div className="min-h-screen bg-base-200 flex items-center justify-center p-6">
         <div className="alert alert-error max-w-lg">
           <span>Error loading settings: {error}</span>
-          <button className="btn btn-sm ml-auto" onClick={refresh}>
-            Retry
-          </button>
+          <button className="btn btn-sm ml-auto" onClick={refresh}>Retry</button>
         </div>
       </div>
     );
@@ -402,55 +414,13 @@ export default function SettingsPage() {
           <div className="card-body">
             <h2 className="card-title">Schedule</h2>
             <div className="join">
-              <button
-                className={`btn join-item ${scheduleMode === "daily" ? "btn-primary" : ""}`}
-                onClick={() => setScheduleMode("daily")}
-              >
-                Daily (9am)
-              </button>
-              <button
-                className={`btn join-item ${scheduleMode === "weekly" ? "btn-primary" : ""}`}
-                onClick={() => setScheduleMode("weekly")}
-              >
-                Weekly (Mon 9am)
-              </button>
-              <button
-                className={`btn join-item ${scheduleMode === "custom" ? "btn-primary" : ""}`}
-                onClick={() => setScheduleMode("custom")}
-              >
-                Custom CRON…
-              </button>
+              <button className={`btn join-item ${scheduleMode === "daily" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("daily")}>Daily (9am)</button>
+              <button className={`btn join-item ${scheduleMode === "weekly" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("weekly")}>Weekly (Mon 9am)</button>
+              <button className={`btn join-item ${scheduleMode === "custom" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("custom")}>Custom CRON…</button>
             </div>
             {scheduleMode === "custom" ? (
-              <div className="text-sm opacity-70">
-                Current cron: <code>{config.schedule?.cron || "n/a"}</code>
-              </div>
+              <div className="text-sm opacity-70">Current cron: <code>{config.schedule?.cron || "n/a"}</code></div>
             ) : null}
-          </div>
-        </div>
-
-        {/* Include Sections */}
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title">Include in Newsletter</h2>
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-              {([
-                ["recentMovies", "Recently added Movies"],
-                ["recentEpisodes", "Recently added TV Episodes"],
-                ["serverMetrics", "Server metrics (weekly graphs)"],
-                ["ownerRecommendation", "Owner recommendation section"],
-              ] as [IncludeKeys, string][]).map(([key, label]) => (
-                <label key={key} className="flex items-center gap-3">
-                  <input
-                    type="checkbox"
-                    className="toggle"
-                    checked={!!config.include?.[key]}
-                    onChange={(e) => toggleInclude(key, e.target.checked)}
-                  />
-                  <span>{label}</span>
-                </label>
-              ))}
-            </div>
           </div>
         </div>
 
@@ -539,9 +509,7 @@ export default function SettingsPage() {
           <div className="card-body">
             <div className="flex items-center justify-between">
               <h2 className="card-title">Recipients</h2>
-              <button className="btn btn-primary" onClick={addRecipient}>
-                Add Recipient
-              </button>
+              <button className="btn btn-primary" onClick={addRecipient}>Add Recipient</button>
             </div>
             {(!config.recipients || config.recipients.length === 0) ? (
               <div className="alert">
@@ -566,12 +534,8 @@ export default function SettingsPage() {
                         <td>{r.email}</td>
                         <td className="text-right">
                           <div className="join">
-                            <button className="btn btn-ghost join-item" onClick={() => editRecipient(i)}>
-                              Edit
-                            </button>
-                            <button className="btn btn-error join-item" onClick={() => removeRecipient(i)}>
-                              Remove
-                            </button>
+                            <button className="btn btn-ghost join-item" onClick={() => editRecipient(i)}>Edit</button>
+                            <button className="btn btn-error join-item" onClick={() => removeRecipient(i)}>Remove</button>
                           </div>
                         </td>
                       </tr>
@@ -589,12 +553,8 @@ export default function SettingsPage() {
             <div className="flex items-center justify-between">
               <div className="text-sm opacity-70">Changes save immediately.</div>
               <div className="join">
-                <button className="btn join-item" onClick={refresh} disabled={saving}>
-                  Reload
-                </button>
-                <button className="btn btn-accent join-item" onClick={handleRunNow} disabled={saving}>
-                  Send Newsletter Now
-                </button>
+                <button className="btn join-item" onClick={refresh} disabled={saving}>Reload</button>
+                <button className="btn btn-accent join-item" onClick={handleRunNow} disabled={saving}>Send Newsletter Now</button>
               </div>
             </div>
           </div>
@@ -604,3 +564,4 @@ export default function SettingsPage() {
     </div>
   );
 }
+
