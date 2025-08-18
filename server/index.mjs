@@ -1,3 +1,4 @@
+import { router as tautulliRouter } from "./routes/tautulli.mjs";
 import express from "express";
 import cors from "cors";
 import nodemailer from "nodemailer";
@@ -145,6 +146,7 @@ reschedule();
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(cors({ origin: "http://localhost:5173" }));
+app.use("/tautulli", tautulliRouter);
 
 app.get("/health", (_req, res) => res.json({ ok: true }));
 

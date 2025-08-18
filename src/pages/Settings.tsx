@@ -1,3 +1,4 @@
+import TautulliStatsCard from "../components/TautulliStatsCard";
 import React, { useEffect, useMemo, useState } from "react";
 import { getConfig, postConfig, runNow } from "../api";
 
@@ -194,7 +195,13 @@ export default function SettingsPage() {
             </label>
           </div>
         </div>
-
+          {/* Tautulli Stats */}
+          <div className="card bg-base-100 shadow">
+            <div className="card-body">
+              <h2 className="card-title">Tautulli Stats (Last {config.lookbackDays || 7} days)</h2>
+              <TautulliStatsCard days={config.lookbackDays || 7} />
+            </div>
+          </div>
         {/* Recipients */}
         <div className="card bg-base-100 shadow">
           <div className="card-body">
