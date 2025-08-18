@@ -1,236 +1,212 @@
-import { router as tautulliRouter } from "./routes/tautulli.mjs";
+// server/index.mjs
+// Minimal API server for Plex Newsletter (ESM)
+
 import express from "express";
 import cors from "cors";
-import nodemailer from "nodemailer";
-import cron from "node-cron";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { URL as NodeURL } from "node:url";
+import { fetch, Agent } from "undici";
 
-// ---------- paths & helpers ----------
+// ---------- paths / config helpers ----------
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const CONFIG_PATH = path.join(__dirname, "config.json");
+const CONFIG_DIR = path.join(__dirname, "..", "config");
+const CONFIG_PATH = path.join(CONFIG_DIR, "config.json");
 
-function readJSON(p, fallback) {
-  try { return JSON.parse(fs.readFileSync(p, "utf8")); }
-  catch { return fallback; }
-}
-function writeJSON(p, obj) {
-  fs.writeFileSync(p, JSON.stringify(obj, null, 2));
-}
-
-// ---------- config load/save ----------
-const DEFAULT_CONFIG = readJSON(CONFIG_PATH, {
-  schedule: { mode: "weekly", cron: "0 9 * * 1" }, // Mon 09:00
-  include: { recentMovies: true, recentEpisodes: true, serverMetrics: false, ownerRecommendation: true },
-  lookbackDays: 7,
-  ownerRecommendation: { plexItemId: "", note: "" },
-  recipients: [{ name: "Example Recipient", email: "you@example.com" }],
-  smtp: { host: "", port: 587, mode: "starttls", user: "", pass: "", from: "" }
-});
-
-function loadConfig() { return readJSON(CONFIG_PATH, DEFAULT_CONFIG); }
-function saveConfig(cfg) { writeJSON(CONFIG_PATH, cfg); }
-
-function modeToCron(mode, customCron) {
-  if (mode === "daily")  return "0 9 * * *";  // every day at 09:00
-  if (mode === "weekly") return "0 9 * * 1";  // every Monday at 09:00
-  return customCron || "0 9 * * 1";
-}
-
-// ---------- mailer ----------
-function buildTransport({ host, port, mode, user, pass }) {
-  const secure = mode === "ssl";
-  return nodemailer.createTransport({
-    host,
-    port: Number(port),
-    secure,                // ssl (465) when true; starttls (587) when false
-    auth: { user, pass },
-    requireTLS: !secure
-    // tls: { rejectUnauthorized: false } // uncomment only for self-signed certs you trust
-  });
-}
-
-async function sendHtmlEmail({ smtp, to, subject, html, text }) {
-  const transporter = buildTransport(smtp);
-  await transporter.verify();
-  const info = await transporter.sendMail({
-    from: smtp.from,
-    to,
-    subject,
-    text: text || undefined,
-    html: html || undefined
-  });
-  return info;
-}
-
-// ---------- newsletter stub (replace with real builder later) ----------
-function buildNewsletterHTML({ include, lookbackDays, ownerRecommendation }) {
-  const parts = [];
-  parts.push(`<h2>Your Weekly Plex Digest</h2>`);
-  parts.push(`<p>Lookback window: last ${lookbackDays} day(s).</p>`);
-  if (include.recentMovies) parts.push(`<h3>Recently Added — Movies</h3><p>(placeholder)</p>`);
-  if (include.recentEpisodes) parts.push(`<h3>Recently Added — TV</h3><p>(placeholder)</p>`);
-  if (include.serverMetrics) parts.push(`<h3>Server Metrics</h3><p>(placeholder)</p>`);
-  if (include.ownerRecommendation) {
-    parts.push(`<h3>Owner Recommendation</h3>`);
-    parts.push(`<p>${ownerRecommendation?.note || "(no note)"}${ownerRecommendation?.plexItemId ? " • Item: " + ownerRecommendation.plexItemId : ""}</p>`);
+function ensureConfigDir() {
+  if (!fs.existsSync(CONFIG_DIR)) fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!fs.existsSync(CONFIG_PATH)) {
+    fs.writeFileSync(
+      CONFIG_PATH,
+      JSON.stringify(
+        {
+          schedule: { mode: "weekly" },
+          include: {
+            recentMovies: true,
+            recentEpisodes: true,
+            serverMetrics: false,
+            ownerRecommendation: true,
+          },
+          lookbackDays: 7,
+          ownerRecommendation: { plexItemId: "", note: "" },
+          recipients: [{ name: "Example Recipient", email: "you@example.com" }],
+          smtp: { host: "", port: 587, mode: "starttls", user: "", pass: "", from: "" },
+          tautulli: { url: "", apiKey: "" },
+          plex: { url: "", token: "", webBase: "", machineIdentifier: "", insecureTLS: true }, // 👈 allow LAN certs
+        },
+        null,
+        2
+      )
+    );
   }
-  parts.push(`<p style="color:#667085;font-size:12px">Generated ${new Date().toLocaleString()}</p>`);
-  return `<!doctype html><html><body style="font-family:Arial,Helvetica,sans-serif">${parts.join("")}</body></html>`;
 }
 
-// ---------- job runner ----------
-async function runJobOnce(reason = "manual") {
-  const cfg = loadConfig();
-
-  if (!cfg.smtp?.host || !cfg.smtp?.user || !cfg.smtp?.pass || !cfg.smtp?.from) {
-    throw new Error("SMTP is not configured. Set host/user/pass/from in /config.");
-  }
-  if (!Array.isArray(cfg.recipients) || cfg.recipients.length === 0) {
-    throw new Error("No recipients configured in /config.");
-  }
-
-  const html = buildNewsletterHTML({
-    include: cfg.include || {},
-    lookbackDays: cfg.lookbackDays ?? 7,
-    ownerRecommendation: cfg.ownerRecommendation || {}
-  });
-
-  const subject = `Plex Weekly Digest (${new Date().toISOString().slice(0,10)})`;
-  const results = [];
-
-  for (const r of cfg.recipients) {
-    try {
-      const info = await sendHtmlEmail({
-        smtp: cfg.smtp,
-        to: r.email,
-        subject,
-        html,
-        text: html.replace(/<[^>]+>/g, " ")
-      });
-      results.push({ email: r.email, ok: true, messageId: info.messageId });
-    } catch (e) {
-      results.push({ email: r.email, ok: false, error: String(e?.message || e) });
-    }
-  }
-
-  return { ok: true, reason, sent: results };
-}
-
-// ---------- scheduler ----------
-let task = null;
-function reschedule() {
-  try { if (task) { task.stop(); task = null; } } catch {}
-  const cfg = loadConfig();
-  const cronExpr = modeToCron(cfg?.schedule?.mode, cfg?.schedule?.cron);
+function readConfigRaw() {
+  ensureConfigDir();
   try {
-    task = cron.schedule(cronExpr, async () => {
-      try {
-        console.log("[SCHEDULER] running job at", new Date().toISOString());
-        const res = await runJobOnce("scheduled");
-        console.log("[SCHEDULER] results:", res);
-      } catch (e) {
-        console.error("[SCHEDULER] job error:", e);
-      }
-    }, { timezone: Intl.DateTimeFormat().resolvedOptions().timeZone });
-    console.log("[SCHEDULER] scheduled with", cronExpr);
-  } catch (e) {
-    console.error("[SCHEDULER] invalid cron:", cronExpr, e);
+    const txt = fs.readFileSync(CONFIG_PATH, "utf8");
+    return JSON.parse(txt);
+  } catch {
+    return {};
   }
 }
-reschedule();
 
-// ---------- server ----------
+function writeConfigRaw(cfg) {
+  ensureConfigDir();
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2));
+}
+
+function deepMerge(base, partial) {
+  if (Array.isArray(partial)) return partial.slice();
+  if (partial && typeof partial === "object") {
+    const out = { ...(base || {}) };
+    for (const k of Object.keys(partial)) {
+      out[k] = deepMerge(base?.[k], partial[k]);
+    }
+    return out;
+  }
+  return partial;
+}
+
+function getConfig(maskSensitive = true) {
+  const cfg = readConfigRaw();
+  if (maskSensitive) {
+    const m = JSON.parse(JSON.stringify(cfg));
+    if (m?.smtp?.pass) m.smtp.pass = "********";
+    return m;
+  }
+  return cfg;
+}
+
+function saveConfig(partial) {
+  const current = readConfigRaw();
+  const next = deepMerge(current, partial || {});
+  writeConfigRaw(next);
+  return getConfig(true);
+}
+
+// ---------- app ----------
 const app = express();
 app.use(express.json({ limit: "2mb" }));
 app.use(cors({ origin: "http://localhost:5173" }));
-app.use("/tautulli", tautulliRouter);
 
+// health
 app.get("/health", (_req, res) => res.json({ ok: true }));
 
-// Mask password when returning config
-function maskConfig(cfg) {
-  const copy = JSON.parse(JSON.stringify(cfg || {}));
-  if (copy?.smtp?.pass) copy.smtp.pass = "********";
-  return copy;
-}
-
-// Get current config
+// config get
 app.get("/config", (_req, res) => {
-  const cfg = loadConfig();
-  res.json({ ok: true, config: maskConfig(cfg) });
+  res.json({ ok: true, config: getConfig(true) });
 });
 
-// Update config (partial merge)
+// config post (partial update)
 app.post("/config", (req, res) => {
   try {
-    const incoming = req.body || {};
-    const current = loadConfig();
-
-    // Merge, but allow smtp.pass to be updated if provided
-    const merged = {
-      ...current,
-      ...incoming,
-      include: { ...current.include, ...(incoming.include || {}) },
-      smtp: { ...current.smtp, ...(incoming.smtp || {}) }
-    };
-
-    // Persist and reschedule
-    saveConfig(merged);
-    reschedule();
-
-    res.json({ ok: true, config: maskConfig(merged) });
+    const updated = saveConfig(req.body || {});
+    res.json({ ok: true, config: updated });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    res.status(400).json({ ok: false, error: e?.message || String(e) });
   }
 });
 
-// Manual run trigger
-app.post("/run", async (_req, res) => {
-  try {
-    const out = await runJobOnce("manual");
-    res.json(out);
-  } catch (e) {
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+// (stub) run now
+app.post("/run", (req, res) => {
+  const cfg = getConfig(false);
+  if (!cfg?.smtp?.host || !cfg?.smtp?.user || !cfg?.smtp?.pass || !cfg?.smtp?.from) {
+    return res
+      .status(400)
+      .json({ ok: false, error: "SMTP is not configured. Set host/user/pass/from in /config." });
   }
+  res.json({ ok: true, sent: (cfg.recipients || []).map((r) => r.email) });
 });
 
-// Existing raw-send endpoint (used by the wizard "Send Test")
-app.post("/send", async (req, res) => {
+// ---------- Plex image proxy (force HTTP for LAN IPs to avoid TLS/SAN mismatch) ----------
+const laxAgent = new Agent({
+  connect: {
+    // tolerate self-signed / mismatched SANs if we still hit HTTPS
+    tls: { rejectUnauthorized: false },
+  },
+});
+
+// Use: <img src="/plex/image?u=<encoded full plex image url>" />
+app.get("/plex/image", async (req, res) => {
+  const u = req.query.u;
+  if (!u || typeof u !== "string") {
+    res.status(400).send("missing u");
+    return;
+  }
+
+  // helper: detect private/LAN hosts
+  function isPrivateHost(host) {
+    if (!host) return false;
+    const h = String(host).toLowerCase();
+    if (h === "localhost" || h === "127.0.0.1") return true;
+    if (h.startsWith("10.")) return true;
+    if (h.startsWith("192.168.")) return true;
+    if (h.startsWith("172.")) {
+      const n = parseInt(h.split(".")[1] || "0", 10);
+      if (n >= 16 && n <= 31) return true;
+    }
+    return false;
+  }
+
+  let target;
   try {
-    const {
-      host, port, secure, username, password,
-      from, to, subject, html, text
-    } = req.body || {};
+    const urlObj = new NodeURL(u);
 
-    if (!host || !port || typeof secure === "undefined" || !username || !password) {
-      return res.status(400).json({ ok: false, error: "Missing SMTP settings (host, port, secure, username, password)" });
-    }
-    if (!from || !to || !subject || (!html && !text)) {
-      return res.status(400).json({ ok: false, error: "Missing email fields (from, to, subject, html|text)" });
+    // If user passed an https:// URL to a LAN IP/host, drop to http:// to avoid TLS SNI/cert mismatches.
+    if (urlObj.protocol === "https:" && isPrivateHost(urlObj.hostname)) {
+      urlObj.protocol = "http:";
     }
 
-    const transporter = nodemailer.createTransport({
-      host,
-      port: Number(port),
-      secure: Boolean(secure),
-      auth: { user: username, pass: password },
-      requireTLS: !Boolean(secure),
+    target = urlObj.toString();
+  } catch {
+    res.status(400).send("bad url");
+    return;
+  }
+
+  try {
+    const isHttps = target.startsWith("https://");
+
+    const r = await fetch(target, {
+      headers: {
+        Accept: "image/*,*/*;q=0.8",
+        "User-Agent": "plex-newsletter-proxy/1.0",
+      },
+      redirect: "follow",
+      ...(isHttps ? { dispatcher: laxAgent } : {}),
     });
 
-    await transporter.verify();
-    const info = await transporter.sendMail({ from, to, subject, text: text || undefined, html: html || undefined });
-    res.json({ ok: true, messageId: info.messageId, accepted: info.accepted, rejected: info.rejected });
+    if (!r.ok) {
+      res.status(r.status).send(`upstream ${r.status}`);
+      return;
+    }
+
+    res.setHeader("Content-Type", r.headers.get("content-type") || "image/jpeg");
+    const cl = r.headers.get("content-length");
+    if (cl) res.setHeader("Content-Length", cl);
+    res.setHeader("Cache-Control", "public, max-age=600");
+
+    // stream to client
+    if (r.body && typeof r.body.pipe === "function") {
+      r.body.pipe(res);
+    } else {
+      const buf = Buffer.from(await r.arrayBuffer());
+      res.end(buf);
+    }
   } catch (e) {
-    console.error("[SMTP] send error:", e);
-    res.status(500).json({ ok: false, error: String(e?.message || e) });
+    console.error("plex/image proxy error:", e);
+    res.status(502).send("bad gateway");
   }
 });
 
-// Start
+// ---------- Tautulli routes ----------
+import { router as tautulliRouter } from "./routes/tautulli.mjs";
+app.use("/tautulli", tautulliRouter);
+
+// ---------- start ----------
 const PORT = process.env.PORT || 5174;
 app.listen(PORT, () => {
-  console.log(`SMTP sender running on http://localhost:${PORT}`);
+  console.log(`API server running on http://localhost:${PORT}`);
 });
