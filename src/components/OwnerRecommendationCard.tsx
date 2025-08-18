@@ -1,338 +1,401 @@
 import React from "react";
 
-/** --- Small helpers --- */
-function apiBase() {
-  return "http://localhost:5174";
-}
-function plexImgFromPath(path?: string) {
-  if (!path) return undefined;
-  // path typically like: /library/metadata/12345/thumb/1699999999
-  return `${apiBase()}/plex/image?path=${encodeURIComponent(
-    path.startsWith("/") ? path : `/${path}`
-  )}`;
-}
-
-type SearchType = "movie" | "show";
-type SearchItem = {
-  ratingKey: string | number;
-  title: string;
-  year?: number;
-  thumb?: string;      // path form (preferred)
-  type?: "movie" | "show" | "episode" | string;
-};
-
-type OwnerRecommendationConfig = {
-  enabled?: boolean;
-  type?: SearchType;
-  plexItemId?: string | number;
-  note?: string;
-};
-
 type Props = {
-  /** Provide the full config object */
   config: any;
-  /** Persist partial config to backend */
-  save: (partial: any) => Promise<void>;
+  save: (partial: any) => Promise<void> | void;
 };
+
+type SearchResult = {
+  ratingKey: string | number;
+  title?: string;
+  year?: number;
+  type?: string; // movie | show | episode | season | unknown
+  showTitle?: string;
+  episodeTitle?: string;
+  seasonIndex?: number;
+  episodeIndex?: number;
+  thumb?: string;      // full URL
+  thumbPath?: string;  // e.g. /library/metadata/.../thumb/...
+  grandparentThumb?: string;
+  parentThumb?: string;
+  art?: string;
+  deepLink?: string;
+  href?: string;
+};
+
+function normNum(n: any): number | undefined {
+  const x = Number(n);
+  return Number.isFinite(x) ? x : undefined;
+}
+
+function pickThumbPath(it: any): string | undefined {
+  // Prefer the smallest poster-like asset
+  return (
+    it?.thumbPath ||
+    it?.thumb ||
+    it?.grandparentThumb ||
+    it?.parentThumb ||
+    it?.grandparent_thumb ||
+    it?.parent_thumb ||
+    it?.art ||
+    it?.poster
+  );
+}
+
+// Some Plex endpoints return { MediaContainer: { Metadata: [ ... ] } } or { Metadata: [ ... ] }
+// Unwrap to a single item object when possible.
+function unwrapPlexNode(raw: any): any {
+  if (!raw) return raw;
+  const mc = raw.MediaContainer ?? raw.mediacontainer;
+  if (mc?.Metadata && Array.isArray(mc.Metadata) && mc.Metadata.length) return mc.Metadata[0];
+  if (raw.Metadata && Array.isArray(raw.Metadata) && raw.Metadata.length) return raw.Metadata[0];
+  return raw;
+}
+
+function normalizeItem(input: any): SearchResult {
+  if (!input) return { ratingKey: "" };
+  const raw = unwrapPlexNode(input);
+
+  const ratingKey =
+    raw.ratingKey ??
+    raw.rating_key ??
+    raw.id ??
+    raw.key ??
+    raw.guid ??
+    "";
+
+  const title =
+    raw.title ??
+    raw.name ??
+    raw.grandparent_title ??
+    raw.parent_title ??
+    "";
+
+  const year =
+    normNum(raw.year) ??
+    normNum(raw.originallyAvailableAt?.slice?.(0, 4)) ??
+    undefined;
+
+  // Try hard to determine type
+  let type: string | undefined = (raw.type ?? raw.librarySectionType ?? raw.media_type) as any;
+  if (!type) {
+    // Heuristics
+    if (raw.grandparent_title || raw.grandparentTitle) type = "episode";
+  }
+
+  const showTitle =
+    raw.grandparent_title ??
+    raw.grandparentTitle ??
+    raw.seriesTitle ??
+    raw.showTitle ??
+    raw.parent_title ??
+    raw.parentTitle ??
+    raw.parent_name ??
+    undefined;
+
+  // Prefer the *episode* title when the object is an episode
+  const episodeTitle = raw.type === "episode" ? (raw.title ?? raw.episodeTitle) : (raw.episodeTitle ?? undefined);
+
+  const seasonIndex =
+    normNum(raw.parentIndex) ??
+    normNum(raw.parent_index) ??
+    normNum(raw.season) ??
+    normNum(raw.seasonIndex) ??
+    undefined;
+
+  const episodeIndex =
+    normNum(raw.index) ??
+    normNum(raw.episodeIndex) ??
+    normNum(raw.episode) ??
+    undefined;
+
+  const thumbPath =
+    raw.thumbPath ??
+    raw.thumb ??
+    raw.grandparentThumb ??
+    raw.parentThumb ??
+    raw.grandparent_thumb ??
+    raw.parent_thumb ??
+    raw.art ??
+    undefined;
+
+  const deepLink = raw.deepLink ?? raw.href ?? raw.url ?? undefined;
+  const href = raw.href ?? raw.deepLink ?? raw.url ?? undefined;
+
+  return {
+    ratingKey,
+    title,
+    year,
+    type,
+    showTitle,
+    episodeTitle,
+    seasonIndex,
+    episodeIndex,
+    thumbPath,
+    grandparentThumb: raw.grandparentThumb ?? raw.grandparent_thumb,
+    parentThumb: raw.parentThumb ?? raw.parent_thumb,
+    art: raw.art,
+    deepLink,
+    href,
+  };
+}
+
+async function enrichEpisodes(base: SearchResult[]): Promise<SearchResult[]> {
+  // If we can't confidently format an item (missing show/se/ep for an episode),
+  // fetch canonical details for up to 12 candidates to enrich the label.
+  const candidates = base
+    .map((r, idx) => ({ r, idx }))
+    .filter(({ r }) => {
+      const t = String(r.type || "").toLowerCase();
+      const isEp = t === "episode" || (!!r.ratingKey && !t); // unclear type → try enrich
+      const missingBits = !r.showTitle || r.seasonIndex == null || r.episodeIndex == null;
+      return isEp && missingBits;
+    })
+    .slice(0, 12);
+
+  if (candidates.length === 0) return base;
+
+  const updates = await Promise.all(
+    candidates.map(async ({ r, idx }) => {
+      try {
+        const resp = await fetch(`http://localhost:5174/plex/item/${encodeURIComponent(String(r.ratingKey))}`);
+        if (!resp.ok) return null;
+        const j = await resp.json();
+        // server might return { ok, item } or raw Plex structures; normalize handles both
+        const full = j?.item ? normalizeItem(j.item) : normalizeItem(j);
+        return full ? { idx, full } : null;
+      } catch {
+        return null;
+      }
+    })
+  );
+
+  const out = base.slice();
+  for (const u of updates) if (u && out[u.idx]) out[u.idx] = { ...out[u.idx], ...u.full };
+  return out;
+}
 
 export default function OwnerRecommendationCard({ config, save }: Props) {
-  // initialize from config
-  const initial: OwnerRecommendationConfig = config?.ownerRecommendation ?? {};
-  const [enabled, setEnabled] = React.useState<boolean>(!!initial.enabled);
-  const [type, setType] = React.useState<SearchType>((initial.type as SearchType) || "movie");
-  const [note, setNote] = React.useState<string>(initial.note ?? "");
-  const [selected, setSelected] = React.useState<SearchItem | null>(null);
-
-  // live search
-  const [q, setQ] = React.useState("");
-  const [results, setResults] = React.useState<SearchItem[]>([]);
+  const [query, setQuery] = React.useState("");
   const [searching, setSearching] = React.useState(false);
-  const [error, setError] = React.useState<string | null>(null);
-  const [dropdownOpen, setDropdownOpen] = React.useState(false);
+  const [results, setResults] = React.useState<SearchResult[]>([]);
+  const [note, setNote] = React.useState<string>(config?.ownerRecommendation?.note || "");
+  const [selectedId, setSelectedId] = React.useState<string | number | undefined>(
+    config?.ownerRecommendation?.plexItemId || undefined
+  );
+  const [selectedItem, setSelectedItem] = React.useState<SearchResult | null>(null);
 
-  // if we have an existing plexItemId, try to hydrate it (once)
+  // Load existing selected item details (if any)
   React.useEffect(() => {
-    const rk = initial.plexItemId;
-    if (!rk) return;
-    let isCancelled = false;
-    (async () => {
-      try {
-        const res = await fetch(`${apiBase()}/plex/item/${encodeURIComponent(String(rk))}`);
-        const json = await res.json();
-        if (!isCancelled && json?.ok && json?.item) {
-          const it = json.item;
-          setSelected({
-            ratingKey: it.ratingKey ?? it.rating_key ?? rk,
-            title: it.title || "Selected Item",
-            year: it.year ? Number(it.year) : undefined,
-            thumb: it.thumb ?? it.grandparentThumb ?? it.art ?? undefined,
-            type: it.type,
-          });
-          // also normalize type if present
-          if (it.type === "show" || it.type === "movie") {
-            setType(it.type);
-          }
-        }
-      } catch {
-        // ignore hydrate errors
-      }
-    })();
-    return () => { isCancelled = true; };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // debounced search (live suggestions after 2+ chars)
-  React.useEffect(() => {
-    if (q.trim().length < 2) {
-      setResults([]);
-      setDropdownOpen(false);
+    const id = config?.ownerRecommendation?.plexItemId;
+    setSelectedId(id);
+    const noteFromCfg = config?.ownerRecommendation?.note || "";
+    setNote(noteFromCfg === "This is the shit!!" ? "" : noteFromCfg);
+    if (!id) {
+      setSelectedItem(null);
       return;
     }
-    let cancelled = false;
-    const t = setTimeout(async () => {
+    (async () => {
       try {
-        setSearching(true);
-        setError(null);
-        setDropdownOpen(true);
-        const url = `${apiBase()}/plex/search?q=${encodeURIComponent(q.trim())}&type=${encodeURIComponent(
-          type
-        )}`;
-        const res = await fetch(url);
-        const json = await res.json();
-        if (!cancelled) {
-          if (json?.ok && Array.isArray(json?.results)) {
-            const rows: SearchItem[] = json.results.map((r: any) => ({
-              ratingKey: r.ratingKey ?? r.rating_key ?? r.id,
-              title: r.title || r.grandparentTitle || "Untitled",
-              year: r.year ? Number(r.year) : undefined,
-              thumb: r.thumb ?? r.grandparentThumb ?? undefined,
-              type: r.type,
-            }));
-            setResults(rows.slice(0, 10)); // keep it tight
-          } else {
-            setResults([]);
-            setError(json?.error ? String(json.error) : "No results.");
-          }
+        const r = await fetch(`http://localhost:5174/plex/item/${encodeURIComponent(String(id))}`);
+        if (r.ok) {
+          const j = await r.json();
+          const item = j?.item ? normalizeItem(j.item) : normalizeItem(j);
+          setSelectedItem(item);
+        } else {
+          setSelectedItem(null);
         }
-      } catch (e: any) {
-        if (!cancelled) {
-          setResults([]);
-          setError(e?.message || String(e));
-        }
-      } finally {
-        if (!cancelled) setSearching(false);
+      } catch {
+        setSelectedItem(null);
       }
-    }, 220);
-    return () => {
-      cancelled = true;
-      clearTimeout(t);
-    };
-  }, [q, type]);
+    })();
+  }, [config?.ownerRecommendation?.plexItemId]);
 
-  async function persist(newState: Partial<OwnerRecommendationConfig>) {
-    const payload = {
-      ownerRecommendation: {
-        enabled,
-        type,
-        note,
-        plexItemId: selected?.ratingKey ?? null,
-        ...newState,
-      },
-    };
-    await save(payload);
+  // Debounced search across ALL libraries
+  React.useEffect(() => {
+    const q = query.trim();
+    if (q.length < 2) {
+      setResults([]);
+      return;
+    }
+    const t = setTimeout(async () => {
+      setSearching(true);
+      try {
+        const r = await fetch(`http://localhost:5174/plex/search?q=${encodeURIComponent(q)}`);
+        if (r.ok) {
+          const j = await r.json();
+          const arr = Array.isArray(j?.results) ? j.results.map(normalizeItem) : [];
+          const enriched = await enrichEpisodes(arr);
+          setResults(enriched);
+        } else {
+          setResults([]);
+        }
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [query]);
+
+  async function chooseItem(it: SearchResult) {
+    // Show something immediately
+    const immediate = normalizeItem(it);
+    setSelectedItem(immediate);
+
+    const id = immediate.ratingKey;
+    setSelectedId(id);
+    await save({ ownerRecommendation: { plexItemId: id, note } });
+
+    // Then fetch canonical item details to enrich thumb/title if needed
+    try {
+      const r = await fetch(`http://localhost:5174/plex/item/${encodeURIComponent(String(id))}`);
+      if (r.ok) {
+        const j = await r.json();
+        const full = j?.item ? normalizeItem(j.item) : normalizeItem(j);
+        if (full) setSelectedItem(full);
+      }
+    } catch {
+      // ignore
+    }
   }
 
-  function onToggleEnabled(v: boolean) {
-    setEnabled(v);
-    void persist({ enabled: v });
+  async function saveNote(next: string) {
+    setNote(next);
+    await save({ ownerRecommendation: { plexItemId: selectedId || "", note: next } });
   }
 
-  function onChooseType(v: SearchType) {
-    setType(v);
-    // clear selection if type changes (to avoid mismatches)
-    setSelected(null);
-    setQ("");
-    setResults([]);
-    setDropdownOpen(false);
-    void persist({ type: v, plexItemId: null });
+  function thumbUrl(it: SearchResult | null): string | undefined {
+    if (!it) return undefined;
+    const p = pickThumbPath(it);
+    if (!p) return undefined;
+
+    // If it's a relative Plex media path, use ?path= ; if it's an absolute URL, use ?u=
+    if (typeof p === "string" && p.startsWith("/")) {
+      return `http://localhost:5174/plex/image?path=${encodeURIComponent(p)}`;
+    }
+    return `http://localhost:5174/plex/image?u=${encodeURIComponent(p)}`;
   }
 
-  function onPick(item: SearchItem) {
-    setSelected(item);
-    setQ("");
-    setResults([]);
-    setDropdownOpen(false);
-    void persist({ plexItemId: item.ratingKey });
+  function deepHref(it: SearchResult | null): string | undefined {
+    return it?.deepLink || it?.href;
   }
 
-  async function onSaveNote() {
-    await persist({ note });
-  }
-
-  function SelectedTile() {
-    if (!selected) return (
-      <div className="opacity-60 text-sm">No title chosen yet.</div>
-    );
-    const img = plexImgFromPath(selected.thumb);
-    return (
-      <div className="flex gap-3 items-start">
-        <div className="w-24">
-          {img ? (
-            <img
-              src={img}
-              alt=""
-              className="w-24 h-36 object-cover rounded"
-              loading="lazy"
-              referrerPolicy="no-referrer"
-            />
-          ) : (
-            <div className="w-24 h-36 bg-base-200 rounded" />
-          )}
-        </div>
-        <div className="min-w-0">
-          <div className="font-semibold truncate">
-            {selected.title} {selected.year ? <span className="opacity-70">({selected.year})</span> : null}
-          </div>
-          <div className="text-xs opacity-70 break-all">ratingKey: {String(selected.ratingKey)}</div>
-        </div>
-      </div>
-    );
-  }
+  const posterSrc = thumbUrl(selectedItem);
+  const titleText =
+    selectedItem?.title
+      ? `${selectedItem.title}${selectedItem.year ? ` (${selectedItem.year})` : ""}`
+      : undefined;
 
   return (
     <div className="card bg-base-100 shadow">
-      <div className="card-body gap-4">
+      <div className="card-body">
         <div className="flex items-center justify-between">
           <h2 className="card-title">Owner Recommendation</h2>
-          <label className="flex items-center gap-3">
-            <span className="text-sm">Enabled</span>
-            <input
-              type="checkbox"
-              className="toggle"
-              checked={enabled}
-              onChange={(e) => onToggleEnabled(e.target.checked)}
-            />
-          </label>
+          {/* No Enabled toggle; no Movie/TV toggle */}
         </div>
 
-        <div className="flex flex-wrap items-center gap-2">
-          <div className="join">
-            <button
-              className={`btn join-item ${type === "movie" ? "btn-primary" : ""}`}
-              onClick={() => onChooseType("movie")}
-            >
-              Movies
-            </button>
-            <button
-              className={`btn join-item ${type === "show" ? "btn-primary" : ""}`}
-              onClick={() => onChooseType("show")}
-            >
-              TV Shows
-            </button>
-          </div>
-
-          <div className="relative">
-            <input
-              type="text"
-              className="input input-bordered w-80"
-              placeholder={`Search ${type === "movie" ? "movies" : "shows"}…`}
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onFocus={() => q.length >= 2 && setDropdownOpen(true)}
-              onBlur={() => setTimeout(() => setDropdownOpen(false), 150)}
-            />
-            {dropdownOpen && (results.length > 0 || searching || error) && (
-              <div className="absolute z-20 mt-1 w-full rounded-md border border-base-300 bg-base-100 shadow">
-                {searching ? (
-                  <div className="p-3 text-sm opacity-70">Searching…</div>
-                ) : results.length > 0 ? (
-                  <ul className="menu menu-sm">
-                    {results.map((r, i) => (
-                      <li key={`${r.ratingKey}-${i}`}>
-                        <button
-                          className="justify-start"
-                          onMouseDown={(e) => e.preventDefault()}
-                          onClick={() => onPick(r)}
-                          title={r.title}
-                        >
-                          <span className="truncate">
-                            {r.title} {r.year ? <span className="opacity-70">({r.year})</span> : null}
-                          </span>
-                        </button>
-                      </li>
-                    ))}
-                  </ul>
-                ) : (
-                  <div className="p-3 text-sm opacity-70">{error || "No matches."}</div>
-                )}
-              </div>
+        <div className="grid grid-cols-1 md:grid-cols-[120px_1fr] gap-4">
+          {/* Preview poster + title */}
+          <div className="flex flex-col items-center">
+            {posterSrc ? (
+              <img
+                src={posterSrc}
+                alt=""
+                className="w-24 h-36 object-cover rounded border border-base-300"
+              />
+            ) : (
+              <div className="w-24 h-36 rounded bg-base-200 border border-base-300" />
             )}
-          </div>
-        </div>
-
-        <div className="grid grid-cols-1 md:grid-cols-[auto,1fr] gap-4">
-          {/* Left: Selected poster+title */}
-          <div>
-            <SelectedTile />
-          </div>
-
-          {/* Right: comment box */}
-          <div className="flex flex-col gap-2">
-            <label className="label">
-              <span className="label-text">Owner note (shown in newsletter)</span>
-            </label>
-            <textarea
-              className="textarea textarea-bordered min-h-24"
-              placeholder="Tell your guests why you recommend this one…"
-              value={note}
-              onChange={(e) => setNote(e.target.value)}
-            />
-            <div className="flex gap-2">
-              <button className="btn btn-primary" onClick={onSaveNote} disabled={!enabled}>
-                Save Recommendation
-              </button>
-              {selected && (
-                <a
-                  className="btn btn-ghost"
-                  href={buildPlexDeepLink(selected.ratingKey)}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  Open in Plex
-                </a>
+            <div className="mt-2 text-center text-sm min-h-[1.25rem]">
+              {selectedItem && titleText ? (
+                deepHref(selectedItem) ? (
+                  <a
+                    href={deepHref(selectedItem)}
+                    target="_blank"
+                    rel="noreferrer"
+                    className="link"
+                    title={titleText}
+                  >
+                    {titleText}
+                  </a>
+                ) : (
+                  <span title={titleText}>{titleText}</span>
+                )
+              ) : (
+                <span className="opacity-60">No selection</span>
               )}
             </div>
           </div>
-        </div>
 
-        <div className="text-xs opacity-60">
-          Tip: start typing at least 2 letters to see live suggestions. Thumbnails are hidden in the dropdown on purpose—once picked, the poster appears on the left.
+          {/* Search + note */}
+          <div className="space-y-3">
+            <label className="form-control">
+              <div className="label">
+                <span className="label-text">Search title (movies &amp; shows)</span>
+              </div>
+              <input
+                type="text"
+                className="input input-bordered"
+                placeholder="Start typing to search…"
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+              />
+            </label>
+
+            {searching ? (
+              <div className="text-sm opacity-70">Searching…</div>
+            ) : results.length > 0 ? (
+              <div className="border border-base-300 rounded">
+                <ul className="menu bg-base-100 max-h-56 overflow-auto">
+                  {results.map((r, i) => {
+                    let label: string;
+                    const t = String(r.type || "").toLowerCase();
+                    if (t === "episode") {
+                      const show = r.showTitle || undefined;
+                      const epName = r.episodeTitle || r.title || "(untitled episode)";
+                      const s = r.seasonIndex ? `Season ${r.seasonIndex}` : null;
+                      const e = r.episodeIndex ? `Episode ${r.episodeIndex}` : null;
+                      const se = s && e ? `${s}, ${e}` : s || e || "";
+                      if (show) {
+                        label = `${show} - ${epName}${se ? ` (${se})` : ""} • EPISODE`;
+                      } else {
+                        label = `${epName}${se ? ` (${se})` : ""} • EPISODE`;
+                      }
+                    } else {
+                      label = `${r.title || "(untitled)"}${r.year ? ` (${r.year})` : ""} ${r.type ? `• ${String(r.type).toUpperCase()}` : ""}`;
+                    }
+                    return (
+                      <li key={`${r.ratingKey}-${i}`}>
+                        <button className="justify-start" onClick={() => chooseItem(r)} title={String(r.ratingKey)}>
+                          <div className="flex items-center gap-2">
+                            <span className="truncate">{label}</span>
+                          </div>
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </div>
+            ) : query.trim().length >= 2 ? (
+              <div className="text-sm opacity-70">No results.</div>
+            ) : null}
+
+            <label className="form-control">
+              <div className="label">
+                <span className="label-text">Owner note (optional)</span>
+              </div>
+              <textarea
+                className="textarea textarea-bordered h-20"
+                placeholder="Describe why you are recommending this"
+                value={note}
+                onChange={(e) => saveNote(e.target.value)}
+              />
+            </label>
+          </div>
         </div>
       </div>
     </div>
   );
-}
-
-/** Deep link helper — uses Plex Web if available via localStorage (set by your Settings page), else no-op */
-function buildPlexDeepLink(ratingKey: string | number | undefined) {
-  if (!ratingKey) return "#";
-  try {
-    const webBase =
-      localStorage.getItem("plex.webBase") ||
-      localStorage.getItem("plexWebBaseUrl") ||
-      "";
-    const serverId =
-      localStorage.getItem("plex.machineIdentifier") ||
-      localStorage.getItem("plexServerId") ||
-      "";
-    if (webBase && serverId) {
-      return `${webBase.replace(
-        /\/$/,
-        ""
-      )}/web/index.html#!/server/${serverId}/details?key=%2Flibrary%2Fmetadata%2F${encodeURIComponent(
-        String(ratingKey)
-      )}`;
-    }
-  } catch {}
-  return "#";
 }
