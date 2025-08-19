@@ -1,177 +1,252 @@
-import express from "express";
-import fs from "fs";
-import path from "path";
-import { fileURLToPath } from "url";
-import { execFile } from "child_process";
+// server/routes/tautulli.mjs
+import { Router } from "express";
+import { getConfig } from "../lib/config.mjs";
+import { Agent as UndiciAgent, setGlobalDispatcher } from "undici";
 
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+// Accept self-signed for internal services (HTTPS-only Tautulli on your LAN)
+try {
+  setGlobalDispatcher(new UndiciAgent({ connect: { tls: { rejectUnauthorized: false } } }));
+} catch {}
 
-/* ---------------- config helpers ---------------- */
-function readConfig() {
-  try {
-    const p = path.join(__dirname, "..", "config", "config.json");
-    return JSON.parse(fs.readFileSync(p, "utf8") || "{}");
-  } catch {
-    return {};
-  }
-}
+const router = Router();
 
-function getTautulliCfg() {
-  const c = readConfig();
-  const t = c?.tautulli || {};
-  return {
-    url: (t.url || "").trim(),        // e.g. https://10.0.1.2:8181
-    apiKey: (t.apiKey || "").trim(),
-    wanHost: (t.wanHost || "").trim() // optional: e.g. kunkflix.net
-  };
-}
-
-/* ---------------- curl wrapper ---------------- */
-function curlJson(url) {
-  return new Promise((resolve, reject) => {
-    // -s silent, -L follow redirects, -k ignore TLS, timeouts for sanity
-    const args = [
-      "-sLk",
-      "--connect-timeout", "5",
-      "--max-time", "15",
-      "-H", "Accept: application/json",
-      "-H", "User-Agent: plex-newsletter/tautulli",
-      url
-    ];
-    execFile("curl", args, { encoding: "utf8" }, (err, stdout, stderr) => {
-      if (err) return reject(new Error(`curl failed: ${err.message}`));
-      const body = stdout && stdout.trim();
-      try {
-        const json = JSON.parse(body);
-        return resolve(json);
-      } catch (e) {
-        return reject(new Error(`Bad JSON from ${url} :: ${body?.slice(0,200)}`));
-      }
-    });
+function buildDispatcher(sniHost) {
+  return new UndiciAgent({
+    connect: { tls: { rejectUnauthorized: false, servername: sniHost || undefined } },
   });
 }
 
-function candidates(rawBase, wanHost) {
-  const out = new Set();
+/* -------------------- config (with env overrides) -------------------- */
+async function readTautulliConfig() {
+  const cfg = await getConfig();
+  const t = cfg?.tautulli || {};
 
-  let base = rawBase || "";
-  if (base && !/^https?:\/\//i.test(base)) base = "https://" + base;
+  const envUrl = process.env.TAUTULLI_URL || process.env.TAUTULLI_BASE_URL;
+  const envKey = process.env.TAUTULLI_API_KEY || process.env.TAUTULLI_APIKEY || process.env.TAUTULLI_TOKEN;
 
-  const push = (proto, host, port) => out.add(`${proto}://${host}${port ? `:${port}` : ""}`);
+  const url = (envUrl || t.url || "").replace(/\/+$/, "");
+  const apiKey = envKey || t.apiKey || t.apikey || t.token || "";
+  const hostHeader = t.hostHeader || process.env.TAUTULLI_HOST_HEADER || null;
+  const sniHost = t.sniHost || process.env.TAUTULLI_SNI_HOST || null;
+
+  return { url, apiKey, hostHeader, sniHost, raw: t };
+}
+
+/* -------------------- core fetch with redirect handling -------------------- */
+async function tautulliFetch(cmd, params = {}, tcfg) {
+  if (!tcfg.url || !tcfg.apiKey) throw new Error("Tautulli URL or API key missing in config");
+
+  const usp = new URLSearchParams({
+    apikey: tcfg.apiKey,
+    cmd,
+    ...Object.fromEntries(Object.entries(params).map(([k, v]) => [k, String(v)])),
+  });
+
+  const base = tcfg.url;
+  const url1 = `${base}/api/v2?${usp.toString()}`;
+  const headers = {};
+  if (tcfg.hostHeader) headers["Host"] = String(tcfg.hostHeader);
 
   try {
-    if (base) {
-      const u = new URL(base);
-      const host = u.hostname;
-      const port = u.port || "8181";
-      const isHttps = u.protocol === "https:";
-      push(isHttps ? "https" : "http", host, port);
-      push(isHttps ? "http"  : "https", host, port);
-      push("https", host, "8181");
-      push("http",  host, "8181");
+    const r1 = await fetch(url1, {
+      headers,
+      dispatcher: buildDispatcher(tcfg.sniHost),
+      redirect: "manual",
+    });
+
+    if ([301, 302, 307, 308].includes(r1.status)) {
+      const loc = r1.headers.get("location") || "";
+      const redirUrl = loc ? (loc.startsWith("http") ? loc : new URL(loc, url1).href) : null;
+      if (!redirUrl) throw new Error(`Redirected with no Location header (status ${r1.status})`);
+      const r2 = await fetch(redirUrl, {
+        headers,
+        dispatcher: buildDispatcher(tcfg.sniHost),
+        redirect: "follow",
+      });
+      if (!r2.ok) {
+        const text2 = await r2.text().catch(() => "");
+        throw new Error(`HTTP ${r2.status} ${r2.statusText} ${text2 ? `- ${text2.slice(0, 200)}` : ""}`);
+      }
+      const j2 = await r2.json();
+      return j2?.response?.data;
     }
-  } catch {
-    if (rawBase) {
-      push("https", rawBase, "8181");
-      push("http",  rawBase, "8181");
+
+    if (!r1.ok) {
+      const text = await r1.text().catch(() => "");
+      throw new Error(`HTTP ${r1.status} ${r1.statusText} ${text ? `- ${text.slice(0, 200)}` : ""}`);
     }
-  }
-
-  if (wanHost) {
-    push("https", wanHost, "8181");
-    push("http",  wanHost, "8181");
-  }
-
-  return Array.from(out);
-}
-
-function apiUrl(base, cmd, q = {}) {
-  const { apiKey } = getTautulliCfg();
-  const u = new URL("/api/v2", base);
-  u.searchParams.set("apikey", apiKey);
-  u.searchParams.set("cmd", cmd);
-  for (const [k, v] of Object.entries(q)) {
-    if (v !== undefined && v !== null) u.searchParams.set(k, String(v));
-  }
-  return u.toString();
-}
-
-/* ---------------- resilient fetchers (via curl) ---------------- */
-async function tryJson(urls) {
-  let lastErr;
-  for (const u of urls) {
-    try {
-      const json = await curlJson(u);
-      return json;
-    } catch (e) {
-      lastErr = e;
-      console.warn("[tautulli] curl failed:", u, "::", String(e?.message || e));
-    }
-  }
-  throw lastErr || new Error("All candidates failed");
-}
-
-async function tStatus() {
-  const { url, wanHost } = getTautulliCfg();
-  if (!url) throw new Error("No tautulli.url configured");
-  const bases = candidates(url, wanHost);
-  const urls = bases.map(b => new URL("/status", b).toString());
-  console.log("[tautulli] STATUS candidates:", urls.join("  |  "));
-  return tryJson(urls);
-}
-
-async function tCall(cmd, params = {}) {
-  const { url, apiKey, wanHost } = getTautulliCfg();
-  if (!url || !apiKey) throw new Error("Tautulli not configured");
-  const bases = candidates(url, wanHost);
-  const urls = bases.map(b => apiUrl(b, cmd, params));
-  console.log("[tautulli] GET candidates:", urls.join("  |  "));
-  const json = await tryJson(urls);
-  const resp = json?.response || json;
-  if (resp?.result && resp.result !== "success") {
-    throw new Error(resp?.message || "Tautulli API error");
-  }
-  return resp?.data ?? resp;
-}
-
-/* ---------------- router ---------------- */
-export const router = express.Router();
-
-router.get("/status", async (_req, res) => {
-  try {
-    const raw = await tStatus();
-    res.json({ ok: true, raw });
+    const j1 = await r1.json();
+    return j1?.response?.data;
   } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e) });
+    console.error(`[tautulliFetch] ${cmd} -> ${url1} failed:`, e?.message || e);
+    throw e;
+  }
+}
+
+/* -------------------- robust aggregators -------------------- */
+
+/** Safely pull a number */
+function num(x) {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Tolerant sum for Tautulli get_plays_by_date:
+ * Handles shapes like:
+ *  A) [{ date, Movies, TV, ...}, ...]
+ *  B) { series: [{ label|name: "Movies", data: [n | {x,y} | [ts, n]] }, ...] }
+ *  C) { data: [{ label|name: "Movies", data: [...] }, ...] }
+ *  D) nested objects/arrays with keys that equal the wanted label (case-insensitive)
+ */
+function sumForLabel(input, wantedLabel) {
+  if (!input) return 0;
+  const wanted = String(wantedLabel).toLowerCase();
+
+  // A) array of rows with columns
+  if (Array.isArray(input)) {
+    return input.reduce((acc, row) => {
+      if (!row || typeof row !== "object") return acc;
+      for (const [k, v] of Object.entries(row)) {
+        if (String(k).toLowerCase() === wanted) acc += num(v);
+      }
+      return acc;
+    }, 0);
+  }
+
+  // B/C) object with series or data arrays
+  if (typeof input === "object") {
+    const buckets = [];
+    if (Array.isArray(input.series)) buckets.push(...input.series);
+    if (Array.isArray(input.data)) buckets.push(...input.data);
+    if (buckets.length) {
+      const s = buckets.find(
+        (b) => String(b?.label || b?.name || "").toLowerCase() === wanted
+      );
+      if (s && Array.isArray(s.data)) {
+        return s.data.reduce((acc, point) => {
+          if (point == null) return acc;
+          if (typeof point === "number") return acc + point;
+          if (Array.isArray(point)) return acc + num(point[1]); // [ts, value]
+          if (typeof point === "object") return acc + num(point.y ?? point.value ?? point.count);
+          return acc;
+        }, 0);
+      }
+    }
+
+    // D) fallback: walk any nested object and sum values at keys matching label
+    let total = 0;
+    const stack = [input];
+    while (stack.length) {
+      const cur = stack.pop();
+      if (Array.isArray(cur)) {
+        for (const it of cur) stack.push(it);
+      } else if (cur && typeof cur === "object") {
+        for (const [k, v] of Object.entries(cur)) {
+          if (String(k).toLowerCase() === wanted) total += num(v);
+          if (v && (typeof v === "object")) stack.push(v);
+        }
+      }
+    }
+    return total;
+  }
+
+  return 0;
+}
+
+/* ------------------------------ routes ------------------------------ */
+
+router.get("/_debug", async (req, res) => {
+  try {
+    const tcfg = await readTautulliConfig();
+    const maskedKey = tcfg.apiKey ? tcfg.apiKey.slice(0, 4) + "…" + tcfg.apiKey.slice(-4) : null;
+    res.json({
+      tautulli: {
+        url: tcfg.url || null,
+        sniHost: tcfg.sniHost || null,
+        hostHeader: tcfg.hostHeader || null,
+        apiKey: maskedKey
+      }
+    });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
 router.get("/home", async (req, res) => {
   try {
-    const days = Number(req.query.days || 7);
-    const data = await tCall("get_home_stats", {
-      time_range: days, stats_type: 0, stats_count: 5
-    });
-    // Tautulli sometimes returns array under response.data
-    const home = Array.isArray(data) ? data : (data?.data ?? data?.rows ?? []);
-    res.json({ ok: true, days, home });
+    const tcfg = await readTautulliConfig();
+    const days = Math.max(0, parseInt(req.query.days ?? "7", 10) || 7);
+    const homeStats = await tautulliFetch(
+      "get_home_stats",
+      { time_range: days, stats_type: 0, stats_count: 25, grouping: 0 },
+      tcfg
+    );
+    res.json({ home: homeStats });
   } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e) });
+    console.error("GET /tautulli/home failed:", e);
+    res.status(500).json({ error: String(e?.message || e) });
   }
 });
 
-// alias used elsewhere in the UI
+/**
+ * Summary with robust totals. Add ?debug=1 to see raw shapes we used.
+ */
 router.get("/summary", async (req, res) => {
+  const debug = String(req.query.debug || "") === "1";
   try {
-    const days = Number(req.query.days || 7);
-    const data = await tCall("get_home_stats", {
-      time_range: days, stats_type: 0, stats_count: 5
-    });
-    const home = Array.isArray(data) ? data : (data?.data ?? data?.rows ?? []);
-    res.json({ ok: true, days, home });
+    const tcfg = await readTautulliConfig();
+    const days = Math.max(0, parseInt(req.query.days ?? "7", 10) || 7);
+
+    const homeStats = await tautulliFetch(
+      "get_home_stats",
+      { time_range: days, stats_type: 0, stats_count: 25, grouping: 0 },
+      tcfg
+    );
+
+    const playsByDate = await tautulliFetch(
+      "get_plays_by_date",
+      { time_range: days, y_axis: "plays" },
+      tcfg
+    );
+
+    const durationByDate = await tautulliFetch(
+      "get_plays_by_date",
+      { time_range: days, y_axis: "duration" },
+      tcfg
+    );
+
+    const movies = sumForLabel(playsByDate, "Movies");
+    const episodes = sumForLabel(playsByDate, "TV"); // Tautulli uses "TV" (episodes)
+    const totalPlays = movies + episodes;
+
+    const moviesSec = sumForLabel(durationByDate, "Movies");
+    const tvSec = sumForLabel(durationByDate, "TV");
+    const totalSeconds = moviesSec + tvSec;
+
+    const payload = {
+      home: homeStats,
+      totals: {
+        movies,
+        episodes,
+        total_plays: totalPlays,
+        total_time_seconds: totalSeconds,
+      },
+    };
+
+    if (debug) {
+      payload.__debug = {
+        playsShape: Object.keys(playsByDate || {}),
+        durationShape: Object.keys(durationByDate || {}),
+        samplePlays: Array.isArray(playsByDate) ? playsByDate.slice(0, 2) : playsByDate,
+        sampleDuration: Array.isArray(durationByDate) ? durationByDate.slice(0, 2) : durationByDate,
+      };
+    }
+
+    res.json(payload);
   } catch (e) {
-    res.json({ ok: false, error: String(e?.message || e) });
+    console.error("GET /tautulli/summary failed:", e);
+    res.status(500).json({ error: "fetch failed" });
   }
 });
 

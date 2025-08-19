@@ -1,18 +1,10 @@
 // src/pages/Settings.tsx
-import React, {
-  useEffect,
-  useMemo,
-  useState,
-  lazy,
-  Suspense,
-} from "react";
+import React, { useEffect, useMemo, useState, lazy, Suspense } from "react";
 import { getConfig, postConfig, runNow } from "../api";
 
-// Existing cards you already have
-import TautulliStatsCard from "../components/TautulliStatsCard";
+// Cards
+import PlexMediaServerDataCard from "../components/PlexMediaServerDataCard";
 import OwnerRecommendationCard from "../components/OwnerRecommendationCard";
-
-// Split-out cards
 import ScheduleCard from "../components/ScheduleCard";
 import HistoryCard from "../components/HistoryCard";
 import OutgoingEmailCard from "../components/OutgoingEmailCard";
@@ -124,15 +116,8 @@ export default function SettingsPage() {
           <OutgoingEmailCard smtpConfig={config?.smtp} save={save} />
         </div>
 
-        {/* Tautulli Stats */}
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title">
-              Tautulli Stats (Last {config?.lookbackDays || 7} days)
-            </h2>
-            <TautulliStatsCard days={config?.lookbackDays || 7} />
-          </div>
-        </div>
+        {/* Plex Media Server Data */}
+        <PlexMediaServerDataCard days={config?.lookbackDays || 7} />
 
         {/* Owner Recommendation */}
         <OwnerRecommendationCard config={config} save={save} />
