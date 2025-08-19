@@ -9,6 +9,7 @@ type Props = {
 const DEFAULT_TEMPLATE = ``;
 
 const TEMPLATE_TOKENS: { key: string; label: string }[] = [
+  { key: "{{CARD_STREAMING_DATA}}", label: "Streaming Data" },
   { key: "{{CARD_MOST_WATCHED_MOVIES}}", label: "Most Watched Movies" },
   { key: "{{CARD_MOST_WATCHED_SHOWS}}", label: "Most Watched TV Shows" },
   { key: "{{CARD_MOST_WATCHED_EPISODES}}", label: "Most Watched Episodes" },

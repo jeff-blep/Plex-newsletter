@@ -1,3 +1,6 @@
+// DEV: permit self-signed TLS for internal services like Tautulli
+import { setGlobalDispatcher, Agent as UndiciAgent } from "undici";
+setGlobalDispatcher(new UndiciAgent({ connect: { tls: { rejectUnauthorized: false } } }));
 // server/index.mjs
 import express from "express";
 import cors from "cors";
