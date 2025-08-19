@@ -1,35 +1,207 @@
 // src/components/RecipientsCard.tsx
-import React from "react";
+import React, { useRef, useState } from "react";
 
-type Props = {
+type Recipient = { name?: string; email: string };
+
+function isValidEmail(s: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+}
+
+// tiny CSV parser (handles quotes & commas in quotes)
+function parseCsv(text: string): string[][] {
+  const rows: string[][] = [];
+  let field = "", row: string[] = [], inQuotes = false, i = 0;
+  const pushField = () => { row.push(field); field = ""; };
+  const pushRow = () => { rows.push(row); row = []; };
+  while (i < text.length) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; } // escaped "
+        inQuotes = false; i++; continue;
+      }
+      field += c; i++; continue;
+    } else {
+      if (c === '"') { inQuotes = true; i++; continue; }
+      if (c === ",") { pushField(); i++; continue; }
+      if (c === "\r") { i++; continue; }
+      if (c === "\n") { pushField(); pushRow(); i++; continue; }
+      field += c; i++; continue;
+    }
+  }
+  // flush last
+  if (field.length || row.length) { pushField(); pushRow(); }
+  // trim trailing blank last row
+  if (rows.length && rows[rows.length - 1].every((x) => x.trim() === "")) rows.pop();
+  return rows;
+}
+
+function normalizeRecipientsFromCsvRows(rows: string[][]): Recipient[] {
+  if (!rows.length) return [];
+  // detect header
+  const header = rows[0].map((h) => h.trim().toLowerCase());
+  let data = rows;
+  const hasHeader =
+    header.includes("email") ||
+    header.join(",").includes("name") && header.join(",").includes("email");
+  if (hasHeader) data = rows.slice(1);
+
+  // column indices
+  let iName = -1, iEmail = -1;
+  if (hasHeader) {
+    iName = header.findIndex((h) => ["name", "full name"].includes(h));
+    iEmail = header.findIndex((h) => ["email", "email address"].includes(h));
+  }
+  // fallback: assume [name, email] or [email]
+  return data
+    .map((cols) => {
+      const c = cols.map((x) => x?.trim() ?? "");
+      let name = "", email = "";
+      if (iEmail >= 0) email = c[iEmail] || "";
+      if (iName >= 0) name = c[iName] || "";
+      if (iEmail < 0 && c.length === 1) { email = c[0]; }
+      if (iEmail < 0 && c.length >= 2) { name = c[0]; email = c[1]; }
+      if (!email) return null;
+      return { name, email };
+    })
+    .filter(Boolean) as Recipient[];
+}
+
+function dedupeKeepFirst(list: Recipient[]): Recipient[] {
+  const seen = new Set<string>();
+  const out: Recipient[] = [];
+  for (const r of list) {
+    const key = r.email.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(r);
+  }
+  return out;
+}
+
+export default function RecipientsCard({
+  config,
+  save,
+}: {
   config: any;
   save: (partial: any) => Promise<void> | void;
-};
+}) {
+  const fileRef = useRef<HTMLInputElement | null>(null);
+  const [busy, setBusy] = useState(false);
 
-export default function RecipientsCard({ config, save }: Props) {
+  const recipients: Recipient[] = Array.isArray(config?.recipients)
+    ? config.recipients
+    : [];
+
+  async function handleImportCsvFile(f: File) {
+    setBusy(true);
+    try {
+      const text = await f.text();
+      const rows = parseCsv(text);
+      const parsed = normalizeRecipientsFromCsvRows(rows)
+        .filter((r) => isValidEmail(r.email));
+      if (!parsed.length) {
+        (window as any).toast?.error?.("CSV had no valid rows (need Name,Email or Email)");
+        return;
+      }
+      const merged = dedupeKeepFirst([
+        ...recipients,
+        ...parsed,
+      ]);
+      await save({ recipients: merged });
+      (window as any).toast?.success?.(`Imported ${merged.length - recipients.length} new recipient(s)`);
+    } catch (e: any) {
+      (window as any).toast?.error?.("Import failed: " + (e?.message || e));
+    } finally {
+      setBusy(false);
+      if (fileRef.current) fileRef.current.value = "";
+    }
+  }
+
+  async function handleImportFromTautulli() {
+    setBusy(true);
+    try {
+      const r = await fetch("http://localhost:5174/tautulli/users");
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const j = await r.json();
+      const fromT = Array.isArray(j?.users) ? j.users : [];
+      const cleaned = fromT
+        .map((u: any) => ({
+          name: (u?.name || u?.username || u?.friendly_name || "").trim(),
+          email: String(u?.email || "").trim(),
+        }))
+        .filter((u: Recipient) => isValidEmail(u.email));
+      if (!cleaned.length) {
+        (window as any).toast?.error?.("No emails found in Tautulli users.");
+        return;
+      }
+      const merged = dedupeKeepFirst([...recipients, ...cleaned]);
+      await save({ recipients: merged });
+      (window as any).toast?.success?.(`Imported ${merged.length - recipients.length} from Tautulli`);
+    } catch (e: any) {
+      (window as any).toast?.error?.("Tautulli import failed: " + (e?.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   return (
     <div className="card bg-base-100 shadow">
       <div className="card-body">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h2 className="card-title">Recipients</h2>
-          <button
-            className="btn btn-primary"
-            onClick={() => {
-              const name = prompt("Recipient name?") || "";
-              const email = prompt("Recipient email?") || "";
-              if (!email) return;
-              save({ recipients: [...(config.recipients || []), { name, email }] });
-            }}
-          >
-            Add Recipient
-          </button>
+          <div className="join">
+            {/* Import CSV */}
+            <input
+              ref={fileRef}
+              type="file"
+              accept=".csv,text/csv"
+              className="hidden"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) handleImportCsvFile(f);
+              }}
+            />
+            <button
+              className={`btn btn-ghost join-item ${busy ? "btn-disabled" : ""}`}
+              onClick={() => fileRef.current?.click()}
+            >
+              Import CSV
+            </button>
+
+            {/* Import from Tautulli */}
+            <button
+              className={`btn join-item ${busy ? "btn-disabled" : ""}`}
+              onClick={handleImportFromTautulli}
+            >
+              Import from Tautulli
+            </button>
+
+            {/* Add single */}
+            <button
+              className={`btn btn-primary join-item ${busy ? "btn-disabled" : ""}`}
+              onClick={() => {
+                const name = prompt("Recipient name?") || "";
+                const email = prompt("Recipient email?") || "";
+                if (!isValidEmail(email)) {
+                  (window as any).toast?.error?.("Please enter a valid email");
+                  return;
+                }
+                const merged = dedupeKeepFirst([...recipients, { name, email }]);
+                save({ recipients: merged });
+              }}
+            >
+              Add Recipient
+            </button>
+          </div>
         </div>
-        {(!config.recipients || config.recipients.length === 0) ? (
-          <div className="alert">
-            <span>No recipients yet. Add at least one to enable sending.</span>
+
+        {(!recipients || recipients.length === 0) ? (
+          <div className="alert mt-3">
+            <span>No recipients yet. Add or import to enable sending.</span>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto mt-3">
             <table className="table">
               <thead>
                 <tr>
@@ -40,7 +212,7 @@ export default function RecipientsCard({ config, save }: Props) {
                 </tr>
               </thead>
               <tbody>
-                {config.recipients.map((r: any, i: number) => (
+                {recipients.map((r: Recipient, i: number) => (
                   <tr key={i}>
                     <td>{i + 1}</td>
                     <td>{r.name || "-"}</td>
@@ -50,11 +222,15 @@ export default function RecipientsCard({ config, save }: Props) {
                         <button
                           className="btn btn-ghost join-item"
                           onClick={() => {
-                            const nr = [...config.recipients];
+                            const nr = [...recipients];
                             const name = prompt("Name:", r.name || "") ?? r.name;
                             const email = prompt("Email:", r.email || "") ?? r.email;
-                            nr[i] = { name, email };
-                            save({ recipients: nr });
+                            if (!isValidEmail(String(email))) {
+                              (window as any).toast?.error?.("Invalid email");
+                              return;
+                            }
+                            nr[i] = { name: String(name || ""), email: String(email || "") };
+                            save({ recipients: dedupeKeepFirst(nr) });
                           }}
                         >
                           Edit
@@ -62,7 +238,7 @@ export default function RecipientsCard({ config, save }: Props) {
                         <button
                           className="btn btn-error join-item"
                           onClick={() => {
-                            const nr = [...(config.recipients || [])];
+                            const nr = [...recipients];
                             nr.splice(i, 1);
                             save({ recipients: nr });
                           }}
@@ -77,6 +253,10 @@ export default function RecipientsCard({ config, save }: Props) {
             </table>
           </div>
         )}
+
+        <div className="opacity-70 text-xs mt-2">
+          CSV format: <code>Name,Email</code> (header optional). Duplicates are removed by email.
+        </div>
       </div>
     </div>
   );
