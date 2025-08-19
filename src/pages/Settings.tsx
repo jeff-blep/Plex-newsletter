@@ -6,7 +6,6 @@ import OwnerRecommendationCard from "../components/OwnerRecommendationCard";
 
 const DEFAULT_TEMPLATE = ``;
 
-// --- Helper types & functions used by placeholder rendering ---
 type HomeBlock = { stat_id?: string; rows?: any[] };
 
 function pickHomeRowsFromHome(home: HomeBlock[] | undefined, ids: string[]) {
@@ -19,7 +18,7 @@ function pickHomeRowsFromHome(home: HomeBlock[] | undefined, ids: string[]) {
   return [];
 }
 function htmlEscape(s: string) {
-  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
+  return String(s ?? "").replace(/[&<>\"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c] as string));
 }
 function li(label: string, value: string) {
   return `<li>${htmlEscape(label)} <span style="opacity:.7">— ${htmlEscape(value)}</span></li>`;
@@ -56,7 +55,6 @@ function ownerBlockHtml(item: any, note: string) {
   return `<div style="display:flex;align-items:flex-start">${img}${info}</div>`;
 }
 
-// --- Card HTML helper for card blocks ---
 function cardHtml(title: string, bodyHtml: string) {
   return `<div style="border:1px solid var(--base-300,#e5e7eb);border-radius:12px;padding:16px;background:#fff;margin:16px 0;">
     <h3 style="margin:0 0 10px 0;font-size:16px;line-height:1.2">${htmlEscape(title)}</h3>
@@ -64,7 +62,6 @@ function cardHtml(title: string, bodyHtml: string) {
   </div>`;
 }
 
-// --- Placeholder menu entries (with added “Recently added” items) ---
 const TEMPLATE_TOKENS: { key: string; label: string }[] = [
   { key: "{{CARD_MOST_WATCHED_MOVIES}}", label: "Most Watched Movies" },
   { key: "{{CARD_MOST_WATCHED_SHOWS}}", label: "Most Watched TV Shows" },
@@ -142,37 +139,15 @@ export default function SettingsPage() {
     }
   }
 
-  function setScheduleMode(mode: ScheduleMode) {
-    if (mode === "custom") {
-      const cron =
-        prompt("Enter CRON expression (min hour day month weekday)", config?.schedule?.cron || "0 9 * * 1") ||
-        config?.schedule?.cron ||
-        "0 9 * * 1";
-      save({ schedule: { mode, cron } });
-    } else {
-      save({ schedule: { mode } });
-    }
-  }
+  // Schedule modal state
+  const [scheduleOpen, setScheduleOpen] = useState(false);
+  const [scheduleDraft, setScheduleDraft] = useState<any>(null);
 
-  function addRecipient() {
-    const name = prompt("Recipient name?") || "";
-    const email = prompt("Recipient email?") || "";
-    if (!email) return;
-    save({ recipients: [...(config.recipients || []), { name, email }] });
-  }
-  function removeRecipient(index: number) {
-    const next = [...(config.recipients || [])];
-    next.splice(index, 1);
-    save({ recipients: next });
-  }
-  function editRecipient(index: number) {
-    const r = config.recipients[index];
-    const name = prompt("Name:", r.name || "") ?? r.name;
-    const email = prompt("Email:", r.email || "") ?? r.email;
-    const next = [...config.recipients];
-    next[index] = { name, email };
-    save({ recipients: next });
-  }
+  // SMTP modal state
+  const [smtpOpen, setSmtpOpen] = useState(false);
+  const [smtpDraft, setSmtpDraft] = useState<any>(null);
+  const [smtpTesting, setSmtpTesting] = useState(false);
+  const [smtpTestResult, setSmtpTestResult] = useState<{ ok: boolean; message?: string } | null>(null);
 
   // formatting commands for the editor
   function exec(cmd: string, value?: string) {
@@ -263,8 +238,6 @@ export default function SettingsPage() {
           htmlToInsert = cardHtml("Most Popular Streaming Platform", body);
           break;
         }
-
-        // New: Recently added (editor preview placeholder)
         case "{{CARD_RECENT_MOVIES}}": {
           const body = `<div style="opacity:.75">Preview • Recently added Movies will be inserted here when sending.</div>`;
           htmlToInsert = cardHtml("Recently added Movies", body);
@@ -275,7 +248,6 @@ export default function SettingsPage() {
           htmlToInsert = cardHtml("Recently added TV Episodes", body);
           break;
         }
-
         case "{{CARD_OWNER_RECOMMENDATION}}": {
           const id = config?.ownerRecommendation?.plexItemId;
           const note = config?.ownerRecommendation?.note || "";
@@ -343,6 +315,158 @@ export default function SettingsPage() {
   const lookback = config?.lookbackDays || 7;
   const maskedFrom = useMemo(() => config?.smtp?.from || "(not set)", [config]);
 
+  function describeSchedule(): string {
+    const s = config?.schedule || {};
+    if (s.frequency) {
+      const freq = String(s.frequency).toLowerCase();
+      const hh = typeof s.hour === 'number' ? s.hour : 9;
+      const mm = typeof s.minute === 'number' ? s.minute : 0;
+      const ampm = hh >= 12 ? 'PM' : 'AM';
+      const hour12 = ((hh + 11) % 12) + 1;
+      const t = `${hour12}:${String(mm).padStart(2, '0')} ${ampm}`;
+      if (freq === 'week') {
+        const day = (s.dayOfWeek || 'monday');
+        const dayCap = String(day).slice(0,1).toUpperCase() + String(day).slice(1);
+        return `${dayCap}s at ${t}`;
+      }
+      if (freq === 'hour') return `Every hour at minute ${mm}`;
+      if (freq === 'month') {
+        const dom = Number(s.dayOfMonth || 1);
+        const sfx = ["th","st","nd","rd"][(dom%100-20)%10] || ["th","st","nd","rd"][dom%10] || "th";
+        return `Monthly on the ${dom}${sfx} at ${t}`;
+      }
+      if (freq === 'year') {
+        const m = Math.max(1, Math.min(12, Number(s.month || 1)));
+        const monthName = [
+          'January','February','March','April','May','June','July','August','September','October','November','December'
+        ][m-1];
+        return `Yearly on ${monthName} 1 at ${t}`;
+      }
+      return `Daily at ${t}`;
+    }
+    const mode: ScheduleMode = (config?.schedule?.mode || 'weekly') as ScheduleMode;
+    if (mode === 'custom') return config?.schedule?.cron || 'Custom schedule';
+    if (mode === 'daily') return 'Every day at 09:00';
+    return 'Mondays at 09:00';
+  }
+
+  async function editSchedule() {
+    const s = config?.schedule || {};
+    let draft: any;
+    if (s.frequency) {
+      draft = {
+        frequency: s.frequency || 'week',
+        dayOfWeek: s.dayOfWeek || 'monday',
+        hour: typeof s.hour === 'number' ? s.hour : 9,
+        minute: typeof s.minute === 'number' ? s.minute : 0,
+        cron: s.cron || '',
+        dayOfMonth: typeof s.dayOfMonth === 'number' ? s.dayOfMonth : 1,
+        month: typeof s.month === 'number' ? s.month : 1,
+      };
+    } else {
+      draft = { frequency: 'week', dayOfWeek: 'monday', hour: 9, minute: 0, cron: s.cron || '', dayOfMonth: 1, month: 1 };
+    }
+    setScheduleDraft(draft);
+    setScheduleOpen(true);
+  }
+
+  const DAYS = ['sunday','monday','tuesday','wednesday','thursday','friday','saturday'];
+  const HOURS12 = Array.from({length:12}, (_,i)=>i+1);
+  const MINUTES = Array.from({length:12}, (_,i)=>i*5);
+  const DAYS_OF_MONTH = Array.from({ length: 31 }, (_, i) => i + 1);
+  const MONTHS = [
+    'January','February','March','April','May','June','July','August','September','October','November','December'
+  ];
+  function to24h(hour12: number, ampm: 'AM'|'PM') {
+    const h = Number(hour12);
+    return ampm === 'AM' ? (h % 12) : ((h % 12) + 12);
+  }
+
+  async function saveScheduleFromDraft() {
+    const d = scheduleDraft || {};
+    const cron = String(d.cron || '').trim();
+    if (cron) {
+      await save({ schedule: { mode: 'custom', cron } });
+      setScheduleOpen(false);
+      return;
+    }
+    const freq = String(d.frequency || 'week').toLowerCase();
+    const derivedAmpm: 'AM'|'PM' = d.ampm ?? ((Number(d.hour ?? 9) >= 12) ? 'PM' : 'AM');
+    let hour = typeof d.hour === 'number' ? d.hour : 9;
+    if (d.hour12) hour = to24h(Number(d.hour12), derivedAmpm);
+    const minute = Math.max(0, Math.min(59, Number(d.minute) || 0));
+    const payload: any = { frequency: freq, hour, minute };
+    if (freq === 'week') payload.dayOfWeek = d.dayOfWeek || 'monday';
+    if (freq === 'month') payload.dayOfMonth = Math.max(1, Math.min(31, Number(d.dayOfMonth) || 1));
+    if (freq === 'year') payload.month = Math.max(1, Math.min(12, Number(d.month) || 1));
+    await save({ schedule: payload });
+    setScheduleOpen(false);
+  }
+
+  async function editFrom() {
+    const cur = config?.smtp || {};
+    setSmtpDraft({
+      host: cur.host || "",
+      port: typeof cur.port === "number" ? cur.port : Number(cur.port) || 587,
+      security: cur.secure ? "ssl" : (cur.starttls ? "starttls" : "none"),
+      authUser: cur.auth?.user || cur.user || "",
+      authPass: "__PRESERVE__",
+      fromName: cur.fromName || cur.name || "",
+      from: cur.from || cur.address || "",
+      replyTo: cur.replyTo || "",
+    });
+    setSmtpTestResult(null);
+    setSmtpOpen(true);
+  }
+
+  function normalizeSmtpDraft(d: any) {
+    const port = Math.max(1, Math.min(65535, Number(d.port) || 587));
+    const secure = d.security === "ssl";
+    const starttls = d.security === "starttls";
+    const out: any = {
+      host: String(d.host || "").trim(),
+      port,
+      secure,
+      starttls,
+      auth: {
+        user: String(d.authUser || "").trim(),
+        pass: d.authPass === "__PRESERVE__" ? (config?.smtp?.auth?.pass || config?.smtp?.pass || "") : String(d.authPass || ""),
+      },
+      fromName: String(d.fromName || "").trim(),
+      from: String(d.from || "").trim(),
+      replyTo: String(d.replyTo || "").trim(),
+    };
+    return out;
+  }
+
+  async function saveSmtp() {
+    const d = normalizeSmtpDraft(smtpDraft || {});
+    if (!d.host) { (window as any).toast?.error?.("SMTP Host is required"); return; }
+    if (!d.from) { (window as any).toast?.error?.("From Email is required"); return; }
+    await save({ smtp: d });
+    setSmtpOpen(false);
+  }
+
+  async function testSmtp() {
+    setSmtpTesting(true);
+    setSmtpTestResult(null);
+    try {
+      const payload = normalizeSmtpDraft(smtpDraft || {});
+      const res = await fetch("http://localhost:5174/test-smtp", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ smtp: payload, to: payload.from })
+      });
+      const body = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(body?.error || body?.message || `HTTP ${res.status}`);
+      setSmtpTestResult({ ok: true, message: body?.message || "Connection OK and test email queued." });
+    } catch (e: any) {
+      setSmtpTestResult({ ok: false, message: e?.message || String(e) });
+    } finally {
+      setSmtpTesting(false);
+    }
+  }
+
   if (loading) {
     return (
       <div className="min-h-screen bg-base-200 flex items-center justify-center">
@@ -384,70 +508,54 @@ export default function SettingsPage() {
 
       {/* Content */}
       <div className="max-w-5xl mx-auto p-6 grid gap-6">
-        {/* Summary */}
-        <div className="stats shadow bg-base-100">
-          <div className="stat">
-            <div className="stat-title">Schedule</div>
-            <div className="stat-value text-lg capitalize">{scheduleMode}</div>
-            <div className="stat-desc">
-              {scheduleMode === "custom"
-                ? (config.schedule?.cron || "")
-                : scheduleMode === "daily"
-                ? "Every day at 09:00"
-                : "Mondays at 09:00"}
+        {/* Consolidated Delivery Settings: three clickable mini-cards on one row */}
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+          {/* Sending Schedule */}
+          <div className="card bg-base-100 shadow hover:shadow-md transition-shadow cursor-pointer" onClick={editSchedule}>
+            <div className="card-body">
+              <div className="card-title">Sending Schedule</div>
+              <div className="text-sm opacity-70 mb-1">When the newsletter will be automatically sent</div>
+              <div className="text-sm">{describeSchedule()}</div>
             </div>
           </div>
-          <div className="stat">
-            <div className="stat-title">Lookback</div>
-            <div className="stat-value text-lg">{lookback}d</div>
-            <div className="stat-desc">How far back to pull data</div>
-          </div>
-          <div className="stat">
-            <div className="stat-title">From</div>
-            <div className="stat-value text-lg truncate">{maskedFrom}</div>
-            <div className="stat-desc">SMTP sender address</div>
-          </div>
-        </div>
 
-        {/* Schedule */}
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title">Schedule</h2>
-            <div className="join">
-              <button className={`btn join-item ${scheduleMode === "daily" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("daily")}>Daily (9am)</button>
-              <button className={`btn join-item ${scheduleMode === "weekly" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("weekly")}>Weekly (Mon 9am)</button>
-              <button className={`btn join-item ${scheduleMode === "custom" ? "btn-primary" : ""}`} onClick={() => setScheduleMode("custom")}>Custom CRON…</button>
+          {/* History (editable number) */}
+          <div className="card bg-base-100 shadow hover:shadow-md transition-shadow">
+            <div className="card-body">
+              <div className="card-title">History</div>
+              <div className="text-sm opacity-70 mb-1">How many days to pull data for the newsletter</div>
+              <label className="form-control w-full max-w-xs">
+                <input
+                  type="number"
+                  min={1}
+                  max={365}
+                  className="input input-bordered w-full max-w-xs"
+                  value={lookback}
+                  onChange={(e) => {
+                    const v = Number(e.target.value || 1);
+                    const n = Math.max(1, Math.min(365, v|0));
+                    if (n !== lookback) save({ lookbackDays: n });
+                  }}
+                />
+              </label>
             </div>
-            {scheduleMode === "custom" ? (
-              <div className="text-sm opacity-70">Current cron: <code>{config.schedule?.cron || "n/a"}</code></div>
-            ) : null}
           </div>
-        </div>
 
-        {/* Lookback */}
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <h2 className="card-title">Lookback Window</h2>
-            <label className="form-control w-full max-w-xs">
-              <div className="label">
-                <span className="label-text">Days to look back</span>
-              </div>
-              <input
-                type="number"
-                min={1}
-                className="input input-bordered w-full max-w-xs"
-                value={lookback}
-                onChange={(e) => save({ lookbackDays: Math.max(1, Number(e.target.value || 1)) })}
-              />
-            </label>
+          {/* Outgoing Email */}
+          <div className="card bg-base-100 shadow hover:shadow-md transition-shadow cursor-pointer" onClick={editFrom}>
+            <div className="card-body">
+              <div className="card-title">Outgoing Email</div>
+              <div className="text-sm opacity-70 mb-1">Sender address used for the newsletter</div>
+              <div className="text-sm truncate">{maskedFrom}</div>
+            </div>
           </div>
         </div>
 
         {/* Tautulli Stats */}
         <div className="card bg-base-100 shadow">
           <div className="card-body">
-            <h2 className="card-title">Tautulli Stats (Last {lookback} days)</h2>
-            <TautulliStatsCard days={lookback} />
+            <h2 className="card-title">Tautulli Stats (Last {config?.lookbackDays || 7} days)</h2>
+            <TautulliStatsCard days={config?.lookbackDays || 7} />
           </div>
         </div>
 
@@ -509,7 +617,12 @@ export default function SettingsPage() {
           <div className="card-body">
             <div className="flex items-center justify-between">
               <h2 className="card-title">Recipients</h2>
-              <button className="btn btn-primary" onClick={addRecipient}>Add Recipient</button>
+              <button className="btn btn-primary" onClick={() => {
+                const name = prompt("Recipient name?") || "";
+                const email = prompt("Recipient email?") || "";
+                if (!email) return;
+                save({ recipients: [...(config.recipients || []), { name, email }] });
+              }}>Add Recipient</button>
             </div>
             {(!config.recipients || config.recipients.length === 0) ? (
               <div className="alert">
@@ -534,8 +647,18 @@ export default function SettingsPage() {
                         <td>{r.email}</td>
                         <td className="text-right">
                           <div className="join">
-                            <button className="btn btn-ghost join-item" onClick={() => editRecipient(i)}>Edit</button>
-                            <button className="btn btn-error join-item" onClick={() => removeRecipient(i)}>Remove</button>
+                            <button className="btn btn-ghost join-item" onClick={() => {
+                              const nr = [...config.recipients];
+                              const name = prompt("Name:", r.name || "") ?? r.name;
+                              const email = prompt("Email:", r.email || "") ?? r.email;
+                              nr[i] = { name, email };
+                              save({ recipients: nr });
+                            }}>Edit</button>
+                            <button className="btn btn-error join-item" onClick={() => {
+                              const nr = [...(config.recipients || [])];
+                              nr.splice(i,1);
+                              save({ recipients: nr });
+                            }}>Remove</button>
                           </div>
                         </td>
                       </tr>
@@ -559,9 +682,212 @@ export default function SettingsPage() {
             </div>
           </div>
         </div>
-
       </div>
+
+      {/* Schedule Modal */}
+      {scheduleOpen && (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-2xl">
+            <h3 className="font-bold text-lg mb-2">Sending Schedule</h3>
+            <p className="text-sm opacity-70 mb-4">Choose when the newsletter is sent automatically.</p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Frequency */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">Every</span></div>
+                <select className="select select-bordered"
+                  value={scheduleDraft?.frequency || 'week'}
+                  onChange={(e)=>setScheduleDraft({...scheduleDraft, frequency:e.target.value})}
+                >
+                  <option value="hour">Hour</option>
+                  <option value="day">Day</option>
+                  <option value="week">Week</option>
+                  <option value="month">Month</option>
+                  <option value="year">Year</option>
+                </select>
+              </label>
+
+              {/* Day of week (only for weekly) */}
+              {String(scheduleDraft?.frequency||'').toLowerCase()==='week' && (
+                <label className="form-control">
+                  <div className="label"><span className="label-text">On</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.dayOfWeek || 'monday'}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, dayOfWeek:e.target.value})}
+                  >
+                    {DAYS.map(d=> <option key={d} value={d}>{d[0].toUpperCase()+d.slice(1)}</option>)}
+                  </select>
+                </label>
+              )}
+
+              {/* Day of month (only for monthly) */}
+              {String(scheduleDraft?.frequency||'').toLowerCase()==='month' && (
+                <label className="form-control">
+                  <div className="label"><span className="label-text">Day</span><span className="label-text-alt opacity-70">1–31</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.dayOfMonth ?? 1}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, dayOfMonth:Number(e.target.value)})}
+                  >
+                    {DAYS_OF_MONTH.map(d=> <option key={d} value={d}>{d}</option>)}
+                  </select>
+                  <div className="label"><span className="label-text-alt opacity-70">If a month has fewer days, it will send on the last day.</span></div>
+                </label>
+              )}
+
+              {/* Month of year (only for yearly) */}
+              {String(scheduleDraft?.frequency||'').toLowerCase()==='year' && (
+                <label className="form-control">
+                  <div className="label"><span className="label-text">Month</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.month ?? 1}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, month:Number(e.target.value)})}
+                  >
+                    {MONTHS.map((m,idx)=> <option key={idx+1} value={idx+1}>{m}</option>)}
+                  </select>
+                  <div className="label"><span className="label-text-alt opacity-70">Will send on the 1st of the selected month.</span></div>
+                </label>
+              )}
+
+              {/* Time row: Hour / Minute / AM-PM */}
+              <div className="grid grid-cols-3 gap-3 md:col-span-2">
+                {/* Hour */}
+                <label className="form-control">
+                  <div className="label"><span className="label-text">Hour</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.hour12 ?? ((((scheduleDraft?.hour ?? 9)+11)%12)+1)}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, hour12:Number(e.target.value)})}
+                  >
+                    {HOURS12.map(h=> <option key={h} value={h}>{h}</option>)}
+                  </select>
+                </label>
+
+                {/* Minute (5-min increments) */}
+                <label className="form-control">
+                  <div className="label"><span className="label-text">Minute</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.minute ?? 0}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, minute:Number(e.target.value)})}
+                  >
+                    {MINUTES.map(m=> <option key={m} value={m}>{String(m).padStart(2,'0')}</option>)}
+                  </select>
+                </label>
+
+                {/* AM/PM */}
+                <label className="form-control">
+                  <div className="label"><span className="label-text">AM / PM</span></div>
+                  <select className="select select-bordered"
+                    value={scheduleDraft?.ampm ?? ((scheduleDraft?.hour ?? 9) >= 12 ? 'PM' : 'AM')}
+                    onChange={(e)=>setScheduleDraft({...scheduleDraft, ampm:e.target.value as 'AM'|'PM'})}
+                  >
+                    <option value="AM">AM</option>
+                    <option value="PM">PM</option>
+                  </select>
+                </label>
+              </div>
+            </div>
+
+            <div className="mt-4">
+              <label className="form-control">
+                <div className="label"><span className="label-text">Custom CRON (optional)</span><span className="label-text-alt opacity-70">Overrides the selections above</span></div>
+                <input
+                  className="input input-bordered"
+                  placeholder="e.g., 0 9 * * 1"
+                  value={scheduleDraft?.cron ?? ''}
+                  onChange={(e)=>setScheduleDraft({...scheduleDraft, cron:e.target.value})}
+                />
+              </label>
+            </div>
+
+            <div className="modal-action">
+              <button className="btn" onClick={()=>setScheduleOpen(false)}>Cancel</button>
+              <button className="btn btn-primary" onClick={saveScheduleFromDraft}>Save</button>
+            </div>
+          </div>
+          <div className="modal-backdrop" onClick={()=>setScheduleOpen(false)}></div>
+        </div>
+      )}
+
+      {/* SMTP Modal */}
+      {smtpOpen && (
+        <div className="modal modal-open">
+          <div className="modal-box max-w-2xl">
+            <h3 className="font-bold text-lg mb-2">Outgoing Email Setup</h3>
+            <p className="text-sm opacity-70 mb-4">Edit the SMTP connection and sender details used to send the newsletter.</p>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Host */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">SMTP Host</span></div>
+                <input className="input input-bordered" value={smtpDraft?.host || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, host:e.target.value})} placeholder="smtp.example.com" />
+              </label>
+              {/* Port */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">Port</span></div>
+                <input type="number" min={1} max={65535} className="input input-bordered" value={smtpDraft?.port ?? 587} onChange={(e)=>setSmtpDraft({...smtpDraft, port:Number(e.target.value)})} />
+              </label>
+              {/* Security */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">Security</span></div>
+                <select className="select select-bordered" value={smtpDraft?.security || 'starttls'} onChange={(e)=>setSmtpDraft({...smtpDraft, security:e.target.value})}>
+                  <option value="none">None</option>
+                  <option value="starttls">STARTTLS</option>
+                  <option value="ssl">SSL/TLS</option>
+                </select>
+              </label>
+              {/* Username */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">Login (Username)</span></div>
+                <input className="input input-bordered" value={smtpDraft?.authUser || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, authUser:e.target.value})} />
+              </label>
+              {/* Password */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Password</span><span className="label-text-alt opacity-70">Leave as-is to keep current</span></div>
+                <input type="password" className="input input-bordered" value={smtpDraft?.authPass || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, authPass:e.target.value})} />
+              </label>
+              {/* From Name */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">From Name</span></div>
+                <input className="input input-bordered" value={smtpDraft?.fromName || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, fromName:e.target.value})} placeholder="Plex Newsletter" />
+              </label>
+              {/* From Email */}
+              <label className="form-control">
+                <div className="label"><span className="label-text">From Email Address</span></div>
+                <input className="input input-bordered" value={smtpDraft?.from || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, from:e.target.value})} placeholder="newsletter@example.com" />
+              </label>
+              {/* Reply-To */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Reply-To (optional)</span></div>
+                <input className="input input-bordered" value={smtpDraft?.replyTo || ''} onChange={(e)=>setSmtpDraft({...smtpDraft, replyTo:e.target.value})} placeholder="support@example.com" />
+              </label>
+            </div>
+
+            {/* Test + Save actions */}
+            <div className="flex items-center justify-between mt-6">
+              <div className="flex items-center gap-3">
+                <button className={`btn ${smtpTesting ? 'loading' : ''}`} onClick={testSmtp} disabled={smtpTesting}>Test</button>
+                {smtpTestResult && (
+                  smtpTestResult.ok ? (
+                    <div className="text-success flex items-center gap-1">
+                      <span>✔</span>
+                      <span className="text-sm">{smtpTestResult.message || 'SMTP OK'}</span>
+                    </div>
+                  ) : (
+                    <div className="text-error flex items-center gap-1">
+                      <span>✖</span>
+                      <span className="text-sm">{smtpTestResult.message || 'Test failed'}</span>
+                    </div>
+                  )
+                )}
+              </div>
+              <div className="modal-action m-0">
+                <button className="btn" onClick={()=>setSmtpOpen(false)}>Cancel</button>
+                <button className="btn btn-primary" onClick={saveSmtp}>Save</button>
+              </div>
+            </div>
+          </div>
+          <div className="modal-backdrop" onClick={()=>setSmtpOpen(false)}></div>
+        </div>
+      )}
     </div>
   );
 }
-
