@@ -58,7 +58,7 @@ function iconForPlatform(name: string): string {
 function thumbUrl(row: any): string | null {
   const p = row?.thumb || row?.grandparent_thumb || row?.grandparentThumb || row?.art;
   if (!p) return null;
-  return `http://localhost:5174/plex/image?path=${encodeURIComponent(p)}`;
+  return `/api/plex/image?path=${encodeURIComponent(p)}`;
 }
 
 export default function PlexMediaServerDataCard({ days }: { days: number }) {
@@ -70,7 +70,7 @@ export default function PlexMediaServerDataCard({ days }: { days: number }) {
     let cancelled = false;
     setLoading(true);
     setErr(null);
-    fetch(`http://localhost:5174/tautulli/summary?days=${encodeURIComponent(days)}`)
+    fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

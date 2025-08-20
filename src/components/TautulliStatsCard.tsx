@@ -10,7 +10,7 @@ function proxiedThumb(raw?: string) {
   if (!raw) return "";
   const isUrl = /^https?:\/\//i.test(raw);
   const q = isUrl ? `u=${encodeURIComponent(raw)}` : `path=${encodeURIComponent(raw)}`;
-  return `http://localhost:5174/plex/image?${q}`;
+  return `/api/plex/image?${q}`;
 }
 
 const nf0 = new Intl.NumberFormat(undefined, { maximumFractionDigits: 0 });
@@ -282,7 +282,7 @@ export default function TautulliStatsCard({ days }: Props) {
     (async () => {
       setLoading(true); setErr(null);
       try {
-        const r = await fetch(`http://localhost:5174/tautulli/summary?days=${encodeURIComponent(days)}`);
+        const r = await fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`);
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
         if (!cancelled) setSummary(j);

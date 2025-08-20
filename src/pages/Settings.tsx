@@ -1,165 +1,216 @@
-// src/pages/Settings.tsx
-import React, { useEffect, useMemo, useState, lazy, Suspense } from "react";
-import { getConfig, postConfig, runNow } from "../api";
+import React from "react";
+import { getConfig, postConfig, testPlex, testTautulli } from "../api";
 
-// Cards
-import PlexMediaServerDataCard from "../components/PlexMediaServerDataCard";
-import OwnerRecommendationCard from "../components/OwnerRecommendationCard";
-import ScheduleCard from "../components/ScheduleCard";
-import HistoryCard from "../components/HistoryCard";
-import OutgoingEmailCard from "../components/OutgoingEmailCard";
-import RecipientsCard from "../components/RecipientsCard";
+type Cfg = {
+  plexUrl: string;
+  plexToken: string;
+  tautulliUrl: string;
+  tautulliApiKey: string;
+  smtpUser?: string;
+  fromAddress?: string;
+  smtpHost?: string;
+  smtpPort?: number;
+  smtpSecure?: boolean;
+  smtpPass?: string;
+};
 
-// Lazy-load the heavy WYSIWYG to speed up initial render
-const EmailTemplateCard = lazy(() => import("../components/EmailTemplateCard"));
+export default function Settings() {
+  const [loading, setLoading] = React.useState(true);
+  const [saving, setSaving] = React.useState(false);
+  const [testing, setTesting] = React.useState<null | "plex" | "tautulli">(null);
+  const [notice, setNotice] = React.useState<string | null>(null);
+  const [error, setError] = React.useState<string | null>(null);
 
-export default function SettingsPage() {
-  const [config, setConfig] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // form state
+  const [plexUrl, setPlexUrl] = React.useState("");
+  const [plexToken, setPlexToken] = React.useState("");
+  const [tautulliUrl, setTautulliUrl] = React.useState("");
+  const [tautulliApiKey, setTautulliApiKey] = React.useState("");
 
-  useEffect(() => {
-    refresh();
+  // also show SMTP values (read-only in this modal)
+  const [smtpUser, setSmtpUser] = React.useState("");
+  const [fromAddress, setFromAddress] = React.useState("");
+
+  React.useEffect(() => {
+    (async () => {
+      setLoading(true);
+      setError(null);
+      setNotice(null);
+      try {
+        const cfg = (await getConfig()) as Cfg;
+        setPlexUrl(cfg.plexUrl || "");
+        setPlexToken(cfg.plexToken || "");
+        setTautulliUrl(cfg.tautulliUrl || "");
+        setTautulliApiKey(cfg.tautulliApiKey || "");
+        setSmtpUser(cfg.smtpUser || "");
+        setFromAddress(cfg.fromAddress || "");
+      } catch (e: any) {
+        setError(e?.message || String(e));
+      } finally {
+        setLoading(false);
+      }
+    })();
   }, []);
 
-  async function refresh() {
-    setLoading(true);
-    setError(null);
-    try {
-      const cfg = await getConfig();
-      setConfig(cfg);
-    } catch (e: any) {
-      setError(e?.message || String(e));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function save(partial: any) {
+  async function handleSave() {
     setSaving(true);
     setError(null);
+    setNotice(null);
     try {
-      const updated = await postConfig(partial);
-      setConfig(updated);
-      (window as any).toast?.success?.("Saved ✓");
+      await postConfig({
+        plexUrl,
+        plexToken,
+        tautulliUrl,
+        tautulliApiKey,
+      });
+      setNotice("Connection settings saved.");
     } catch (e: any) {
       setError(e?.message || String(e));
-      (window as any).toast?.error?.("Save failed: " + (e?.message || e));
     } finally {
       setSaving(false);
     }
   }
 
-  async function handleRunNow() {
+  async function handleTest(kind: "plex" | "tautulli") {
+    setTesting(kind);
+    setError(null);
+    setNotice(null);
     try {
-      const res = await runNow();
-      (window as any).toast?.success?.("Sent: " + JSON.stringify(res.sent));
+      if (kind === "plex") {
+        const r = await testPlex();
+        if ((r as any)?.ok) setNotice("Plex connection OK.");
+        else throw new Error((r as any)?.error || "Plex test failed");
+      } else {
+        const r = await testTautulli();
+        if ((r as any)?.ok) {
+          const sc = (r as any)?.streamCount;
+          setNotice(`Tautulli connection OK${typeof sc === "number" ? ` (streams: ${sc})` : ""}.`);
+        } else {
+          throw new Error((r as any)?.error || "Tautulli test failed");
+        }
+      }
     } catch (e: any) {
-      (window as any).toast?.error?.("Run failed: " + (e?.message || e));
+      setError(e?.message || String(e));
+    } finally {
+      setTesting(null);
     }
   }
 
-  const maskedFrom = useMemo(() => config?.smtp?.from || "(not set)", [config]);
-
   if (loading) {
-    return (
-      <div className="min-h-screen bg-base-200 flex items-center justify-center">
-        <span className="loading loading-spinner loading-lg" />
-      </div>
-    );
-  }
-  if (error) {
-    return (
-      <div className="min-h-screen bg-base-200 flex items-center justify-center p-6">
-        <div className="alert alert-error max-w-lg">
-          <span>Error loading settings: {error}</span>
-          <button className="btn btn-sm ml-auto" onClick={refresh}>
-            Retry
-          </button>
-        </div>
-      </div>
-    );
-  }
-  if (!config) {
-    return (
-      <div className="min-h-screen bg-base-200 flex items-center justify-center">
-        <div className="alert">No config loaded.</div>
-      </div>
-    );
+    return <div className="p-4">Loading settings…</div>;
   }
 
   return (
-    <div className="min-h-screen bg-base-200">
-      {/* Top Nav */}
-      <div className="navbar bg-base-100 shadow">
-        <div className="flex-1 px-2">
-          <span className="text-lg font-semibold">Plex Newsletter • Settings</span>
+    <div className="p-4 space-y-6">
+      <h2 className="text-xl font-bold">Connection Settings</h2>
+
+      {notice && (
+        <div className="p-3 rounded border border-green-500/40 bg-green-500/10 text-green-300">
+          {notice}
         </div>
-        <div className="flex-none gap-2 pr-2">
+      )}
+      {error && (
+        <div className="p-3 rounded border border-red-500/40 bg-red-500/10 text-red-300">
+          {error}
+        </div>
+      )}
+
+      {/* SMTP (read-only here, just so you can see what’s active) */}
+      <section className="space-y-2">
+        <h3 className="font-semibold">SMTP (active)</h3>
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Sender Name (smtpUser)</span>
+            <input className="input input-bordered" value={smtpUser} readOnly />
+          </label>
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Sender Email (fromAddress)</span>
+            <input className="input input-bordered" value={fromAddress} readOnly />
+          </label>
+        </div>
+      </section>
+
+      {/* Plex */}
+      <section className="space-y-2">
+        <h3 className="font-semibold">Plex</h3>
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Plex URL</span>
+            <input
+              className="input input-bordered"
+              value={plexUrl}
+              onChange={(e) => setPlexUrl(e.target.value)}
+              placeholder="http://10.0.1.2:32400"
+            />
+          </label>
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Plex Token</span>
+            <input
+              className="input input-bordered"
+              value={plexToken}
+              onChange={(e) => setPlexToken(e.target.value)}
+              placeholder="your-plex-token"
+            />
+          </label>
+        </div>
+        <div className="flex gap-2">
           <button
-            className="btn btn-accent"
-            onClick={handleRunNow}
+            className={`btn btn-primary ${saving ? "btn-disabled" : ""}`}
+            onClick={handleSave}
             disabled={saving}
           >
-            Send Newsletter Now
+            {saving ? "Saving…" : "Save"}
+          </button>
+          <button
+            className={`btn ${testing === "plex" ? "btn-disabled" : ""}`}
+            onClick={() => handleTest("plex")}
+            disabled={testing === "plex"}
+          >
+            {testing === "plex" ? "Testing Plex…" : "Test Plex"}
           </button>
         </div>
-      </div>
+      </section>
 
-      {/* Content */}
-      <div className="max-w-5xl mx-auto p-6 grid gap-6">
-        {/* Top row: three mini-cards */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <ScheduleCard schedule={config?.schedule} save={save} />
-          <HistoryCard lookbackDays={config?.lookbackDays || 7} save={save} />
-          <OutgoingEmailCard smtpConfig={config?.smtp} save={save} />
+      {/* Tautulli */}
+      <section className="space-y-2">
+        <h3 className="font-semibold">Tautulli</h3>
+        <div className="grid gap-2 md:grid-cols-2">
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Tautulli URL</span>
+            <input
+              className="input input-bordered"
+              value={tautulliUrl}
+              onChange={(e) => setTautulliUrl(e.target.value)}
+              placeholder="http://10.0.1.2:8181"
+            />
+          </label>
+          <label className="flex flex-col">
+            <span className="text-sm opacity-70">Tautulli API Key</span>
+            <input
+              className="input input-bordered"
+              value={tautulliApiKey}
+              onChange={(e) => setTautulliApiKey(e.target.value)}
+              placeholder="your-tautulli-api-key"
+            />
+          </label>
         </div>
-
-        {/* Plex Media Server Data */}
-        <PlexMediaServerDataCard days={config?.lookbackDays || 7} />
-
-        {/* Owner Recommendation */}
-        <OwnerRecommendationCard config={config} save={save} />
-
-        {/* Email Template (WYSIWYG) */}
-        <Suspense
-          fallback={
-            <div className="card bg-base-100 shadow">
-              <div className="card-body">
-                <span className="loading loading-spinner loading-sm" /> Loading
-                template editor…
-              </div>
-            </div>
-          }
-        >
-          <EmailTemplateCard config={config} save={save} />
-        </Suspense>
-
-        {/* Recipients */}
-        <RecipientsCard config={config} save={save} />
-
-        {/* Footer Actions */}
-        <div className="card bg-base-100 shadow">
-          <div className="card-body">
-            <div className="flex items-center justify-between">
-              <div className="text-sm opacity-70">Changes save immediately.</div>
-              <div className="join">
-                <button className="btn join-item" onClick={refresh} disabled={saving}>
-                  Reload
-                </button>
-                <button
-                  className="btn btn-accent join-item"
-                  onClick={handleRunNow}
-                  disabled={saving}
-                >
-                  Send Newsletter Now
-                </button>
-              </div>
-            </div>
-          </div>
+        <div className="flex gap-2">
+          <button
+            className={`btn btn-primary ${saving ? "btn-disabled" : ""}`}
+            onClick={handleSave}
+            disabled={saving}
+          >
+            {saving ? "Saving…" : "Save"}
+          </button>
+          <button
+            className={`btn ${testing === "tautulli" ? "btn-disabled" : ""}`}
+            onClick={() => handleTest("tautulli")}
+            disabled={testing === "tautulli"}
+          >
+            {testing === "tautulli" ? "Testing Tautulli…" : "Test Tautulli"}
+          </button>
         </div>
-      </div>
+      </section>
     </div>
   );
 }
