@@ -9,7 +9,7 @@ type Props = {
 export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState<any>(null);
-  const [testing, setTesting] = useState(false);
+  const [testing, setTesting] = useState(false); const [testingPlex, setTestingPlex] = useState(false); const [testingTautulli, setTestingTautulli] = useState(false);
   const [testResult, setTestResult] = useState<null | { ok: boolean; msg: string }>(null);
 
   function edit() {
@@ -23,6 +23,10 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
       fromName: cur.fromName || "",
       from: cur.from || "",
       replyTo: cur.replyTo || "",
+      plexUrl: cur.plexUrl || "",
+      plexApi: cur.plexApi || "",
+      tautulliUrl: cur.tautulliUrl || "",
+      tautulliApi: cur.tautulliApi || "",
     });
     setOpen(true);
   }
@@ -41,6 +45,10 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
       fromName: String(d.fromName || "").trim(),
       from: String(d.from || "").trim(),
       replyTo: String(d.replyTo || "").trim(),
+      plexUrl: String(d.plexUrl || "").trim(),
+      plexApi: String(d.plexApi || "").trim(),
+      tautulliUrl: String(d.tautulliUrl || "").trim(),
+      tautulliApi: String(d.tautulliApi || "").trim(),
     };
   }
 
@@ -57,7 +65,7 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
     setTestResult(null);
     try {
       const d = normalize(draft || {});
-      const res = await fetch("http://localhost:5174/test-smtp", {
+      const res = await fetch("/api/test-smtp", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(d),
@@ -72,6 +80,52 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
     }
   }
 
+  async function testPlex() {
+    setTestingPlex(true);
+    setTestResult(null);
+    try {
+      const d = normalize(draft || {});
+      if (!d.plexUrl) throw new Error("Plex URL is required");
+      if (!d.plexApi) throw new Error("Plex API Token is required");
+
+      const res = await fetch("/api/test-plex", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ plexUrl: d.plexUrl, plexApi: d.plexApi })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      setTestResult({ ok: true, msg: j?.message || "Plex connection OK ✓" });
+    } catch (e: any) {
+      setTestResult({ ok: false, msg: e?.message || String(e) });
+    } finally {
+      setTestingPlex(false);
+    }
+  }
+
+  async function testTautulli() {
+    setTestingTautulli(true);
+    setTestResult(null);
+    try {
+      const d = normalize(draft || {});
+      if (!d.tautulliUrl) throw new Error("Tautulli URL is required");
+      if (!d.tautulliApi) throw new Error("Tautulli API Key is required");
+
+      const res = await fetch("/api/test-tautulli", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ tautulliUrl: d.tautulliUrl, tautulliApi: d.tautulliApi })
+      });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const j = await res.json();
+      setTestResult({ ok: true, msg: j?.message || "Tautulli connection OK ✓" });
+    } catch (e: any) {
+      setTestResult({ ok: false, msg: e?.message || String(e) });
+    } finally {
+      setTestingTautulli(false);
+    }
+  }
+
   return (
     <>
       {/* Card */}
@@ -80,9 +134,9 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
         onClick={edit}
       >
         <div className="card-body">
-          <div className="card-title">Outgoing Email</div>
+          <div className="card-title">Connection Settings</div>
           <div className="text-sm opacity-70 mb-1">
-            Sender address used for the newsletter
+            SMTP sender and external service endpoints
           </div>
           <div className="text-sm truncate">{smtpConfig?.from || "(not set)"}</div>
         </div>
@@ -92,9 +146,9 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
       {open && (
         <div className="modal modal-open">
           <div className="modal-box max-w-2xl">
-            <h3 className="font-bold text-lg mb-2">Outgoing Email Setup</h3>
+            <h3 className="font-bold text-lg mb-2">Connection Settings</h3>
             <p className="text-sm opacity-70 mb-4">
-              Edit the SMTP connection and sender details used to send the newsletter.
+              Configure SMTP and external service endpoints (Plex & Tautulli) used by the newsletter app.
             </p>
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -144,16 +198,48 @@ export default function OutgoingEmailCard({ smtpConfig, save }: Props) {
               </label>
             </div>
 
+            {/* Divider */}
+            <div className="divider my-6">Plex & Tautulli</div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              {/* Plex URL */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Plex URL</span></div>
+                <input className="input input-bordered" value={draft?.plexUrl || ''} onChange={(e)=>setDraft({...draft, plexUrl:e.target.value})} placeholder="https://10.0.1.2:32400" />
+              </label>
+              {/* Plex API */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Plex API Token</span></div>
+                <input className="input input-bordered" value={draft?.plexApi || ''} onChange={(e)=>setDraft({...draft, plexApi:e.target.value})} placeholder="**<PLEX_API>**" />
+              </label>
+              {/* Tautulli URL */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Tautulli URL</span></div>
+                <input className="input input-bordered" value={draft?.tautulliUrl || ''} onChange={(e)=>setDraft({...draft, tautulliUrl:e.target.value})} placeholder="https://10.0.1.2:8181" />
+              </label>
+              {/* Tautulli API */}
+              <label className="form-control md:col-span-2">
+                <div className="label"><span className="label-text">Tautulli API Key</span></div>
+                <input className="input input-bordered" value={draft?.tautulliApi || ''} onChange={(e)=>setDraft({...draft, tautulliApi:e.target.value})} placeholder="**<TAUTULLI_API>**" />
+              </label>
+            </div>
+
             {testResult && (
               <div className={`mt-3 text-sm ${testResult.ok ? "text-green-600" : "text-red-600"}`}>
                 {testResult.ok ? "✓ " : "✖ "} {testResult.msg}
               </div>
             )}
 
-            <div className="modal-action">
-              <button className="btn" onClick={()=>setOpen(false)}>Cancel</button>
-              <button className={`btn ${testing ? "loading" : ""}`} onClick={testSmtp}>Test</button>
-              <button className="btn btn-primary" onClick={saveSmtp}>Save</button>
+            <div className="modal-action flex items-center justify-between">
+              <div className="flex gap-2">
+                <button className={`btn btn-outline ${testingPlex ? "loading" : ""}`} disabled={testingPlex} onClick={testPlex}>Test Plex</button>
+                <button className={`btn btn-outline ${testingTautulli ? "loading" : ""}`} disabled={testingTautulli} onClick={testTautulli}>Test Tautulli</button>
+              </div>
+              <div className="flex gap-2">
+                <button className="btn" onClick={()=>setOpen(false)}>Cancel</button>
+                <button className={`btn ${testing ? "loading" : ""}`} disabled={testing} onClick={testSmtp}>Test Email</button>
+                <button className="btn btn-primary" onClick={saveSmtp}>Save</button>
+              </div>
             </div>
           </div>
           <div className="modal-backdrop" onClick={()=>setOpen(false)}></div>
