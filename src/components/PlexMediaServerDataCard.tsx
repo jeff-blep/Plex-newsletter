@@ -61,7 +61,7 @@ function thumbUrl(row: any): string | null {
   return `/api/plex/image?path=${encodeURIComponent(p)}`;
 }
 
-export default function PlexMediaServerDataCard({ days }: { days: number }) {
+export default function PlexMediaServerDataCard({ days = 7 }: { days?: number }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
