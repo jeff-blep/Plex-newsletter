@@ -21,7 +21,7 @@ async function j<T = any>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-// Map server fields to UI encryption string
+/** Map server fields -> UI encryption string */
 function toEnc(smtpSecure?: boolean, port?: number): SMTPEnc {
   if (smtpSecure) return "TLS/SSL";
   if (port === 587) return "STARTTLS";
@@ -29,7 +29,7 @@ function toEnc(smtpSecure?: boolean, port?: number): SMTPEnc {
   return "STARTTLS";
 }
 
-// Map UI encryption to server boolean
+/** Map UI encryption -> server boolean */
 function toSecure(enc?: SMTPEnc): boolean {
   return enc === "TLS/SSL";
 }
@@ -37,7 +37,7 @@ function toSecure(enc?: SMTPEnc): boolean {
 /** ---------------- Connections: config ---------------- */
 export async function getConfig() {
   const data = await j<any>("/api/config");
-  // Server keys: smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress, plexUrl, plexToken, tautulliUrl, tautulliApiKey
+  // Server keys: smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress, plexUrl, plexToken, tautulliUrl, tautulliApiKey, lookbackDays
   return {
     plexUrl: data.plexUrl || "",
     plexToken: data.plexToken || "",
@@ -46,11 +46,22 @@ export async function getConfig() {
 
     fromAddress: data.fromAddress || "",
     smtpEmailLogin: data.smtpUser || "",
-    // Never return password to UI
+    // never return password to UI
     smtpServer: data.smtpHost || "",
     smtpPort: typeof data.smtpPort === "number" ? data.smtpPort : 587,
     smtpEncryption: toEnc(!!data.smtpSecure, data.smtpPort),
+
+    lookbackDays: typeof data.lookbackDays === "number" ? data.lookbackDays : 7,
   };
+}
+
+// helper: remove undefined keys so we don't clobber saved config on the server
+function pruneUndefined(obj: Record<string, any>) {
+  const out: Record<string, any> = {};
+  for (const [k, v] of Object.entries(obj)) {
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
 }
 
 export async function postConfig(body: {
@@ -61,13 +72,15 @@ export async function postConfig(body: {
 
   fromAddress?: string;
   smtpEmailLogin?: string;
-  smtpEmailPassword?: string; // optional: empty string will not change server stored password
+  smtpEmailPassword?: string; // optional: empty string won't change server-stored pass
   smtpServer?: string;
   smtpPort?: number;
   smtpEncryption?: SMTPEnc;
+
+  lookbackDays?: number;
 }) {
-  const serverBody: any = {
-    // Plex and Tautulli
+  const serverBody: any = pruneUndefined({
+    // Plex / Tautulli
     plexUrl: body.plexUrl,
     plexToken: body.plexToken,
     tautulliUrl: body.tautulliUrl,
@@ -79,9 +92,12 @@ export async function postConfig(body: {
     smtpHost: body.smtpServer,
     smtpPort: body.smtpPort,
     smtpSecure: toSecure(body.smtpEncryption),
-  };
 
-  // Only send smtpPass if non-empty so we do not clear stored value
+    // History lookback
+    lookbackDays: body.lookbackDays,
+  });
+
+  // Only send smtpPass if non-empty so we don’t clear stored value
   if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0) {
     serverBody.smtpPass = body.smtpEmailPassword;
   }
@@ -95,9 +111,13 @@ export async function postConfig(body: {
 
 /** ---------------- Connections: status for the card ---------------- */
 export async function getStatus() {
-  return j("/api/status");
+  const raw = await j<any>("/api/status");
+  return {
+    emailOk: !!(raw.emailOk ?? raw.email ?? raw.checks?.email?.ok),
+    plexOk: !!(raw.plexOk ?? raw.plex ?? raw.checks?.plex?.ok),
+    tautulliOk: !!(raw.tautulliOk ?? raw.tautulli ?? raw.checks?.tautulli?.ok),
+  };
 }
-
 /** ---------------- Connection tests (slashed routes) ---------------- */
 export async function testPlex(body?: { plexUrl?: string; plexToken?: string }) {
   return j("/api/test/plex", {
@@ -151,12 +171,10 @@ export async function testSmtp(body?: {
 }
 
 /** =================== SCHEDULE =================== */
-// GET saved schedule for the card and modal
 export async function getSchedule() {
   return j("/api/schedule");
 }
 
-// POST schedule (modal save)
 export async function postSchedule(body: {
   dayOfWeek?: number; // 0=Sun..6=Sat
   hour?: number;      // 0..23
@@ -186,7 +204,7 @@ function qp(params: Record<string, any> = {}) {
   return q.toString();
 }
 
-// Low level helper: calls backend proxy /api/tautulli
+/** Low-level helper: calls our backend proxy /api/tautulli */
 async function tautulli<T = any>(cmd: string, params: Record<string, any> = {}): Promise<T> {
   const qs = qp({ cmd, ...params });
   const data = await j<TautulliResponse<T>>(`/api/tautulli?${qs}`);
@@ -197,10 +215,9 @@ async function tautulli<T = any>(cmd: string, params: Record<string, any> = {}):
   return data.response.data as T;
 }
 
-// Convenient wrappers for the card
+/** Convenient wrappers the card can call */
 export async function getTautulliAppInfo() {
-  // Modern command, replaces app_info
-  return tautulli("get_tautulli_info");
+  return tautulli("app_info");
 }
 
 export async function getTautulliHomeStats() {

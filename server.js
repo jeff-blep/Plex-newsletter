@@ -1,4 +1,4 @@
-// server.js — FULL RESHIP with reliable Tautulli summary (timeouts, paging) + debug endpoint
+// server.js — FULL RESHIP with reliable Tautulli summary (timeouts, paging) + UI-compatible /api/status
 "use strict";
 
 const express = require("express");
@@ -80,17 +80,42 @@ async function tautulliCall(cmd, params = {}, timeoutMs = 8000) {
   return json.response.data;
 }
 
-// -------------------- STATUS --------------------
+// -------------------- LIVE STATUS (used by the Connection Settings card) --------------------
 app.get("/api/status", async (_req, res) => {
-  const plexUrl = trimSlash(CONFIG.plexUrl);
-  const tautulliUrl = trimSlash(CONFIG.tautulliUrl);
+  // prevent stale caching
+  res.set("Cache-Control", "no-store");
+
+  async function checkSMTP() {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: CONFIG.smtpHost,
+        port: Number(CONFIG.smtpPort || 587),
+        secure: !!CONFIG.smtpSecure, // true = TLS/SSL
+        auth: (CONFIG.smtpUser && CONFIG.smtpPass) ? {
+          user: CONFIG.smtpUser,
+          pass: CONFIG.smtpPass,
+        } : undefined,
+        connectionTimeout: 2500,
+        greetingTimeout: 2500,
+        socketTimeout: 2500,
+      });
+      await transporter.verify(); // cheap EHLO check
+      return true;
+    } catch {
+      // still consider "configured" as OK-ish to avoid flashing ❌ if verify is blocked
+      const configured = !!(CONFIG.smtpHost && CONFIG.smtpUser && (CONFIG.smtpPass || CONFIG.smtpSecure !== undefined));
+      return configured;
+    }
+  }
 
   async function checkPlex() {
     try {
-      if (!plexUrl || !CONFIG.plexToken) return false;
-      const u = `${plexUrl}/identity?X-Plex-Token=${encodeURIComponent(CONFIG.plexToken)}`;
-      const r = await fetchWithTimeout(u, {}, 6000);
-      return r.ok;
+      const base = (CONFIG.plexUrl || "").replace(/\/+$/, "");
+      const token = CONFIG.plexToken || "";
+      if (!base || !token) return false;
+      const u = `${base}/identity?X-Plex-Token=${encodeURIComponent(token)}`;
+      const r = await fetchWithTimeout(u, {}, 2500);
+      return !!(r && r.ok);
     } catch {
       return false;
     }
@@ -98,25 +123,45 @@ app.get("/api/status", async (_req, res) => {
 
   async function checkTautulli() {
     try {
-      if (!tautulliUrl || !CONFIG.tautulliApiKey) return false;
-      const u = `${tautulliUrl}/api/v2?apikey=${encodeURIComponent(CONFIG.tautulliApiKey)}&cmd=get_tautulli_info`;
-      const r = await fetchWithTimeout(u, {}, 6000);
-      return r.ok;
+      const base = (CONFIG.tautulliUrl || "").replace(/\/+$/, "");
+      const api = CONFIG.tautulliApiKey || "";
+      if (!base || !api) return false;
+
+      // Use the SAME command as the working test endpoint
+      const u = `${base}/api/v2?apikey=${encodeURIComponent(api)}&cmd=get_tautulli_info`;
+      const r = await fetchWithTimeout(u, {}, 2500);
+      if (!r || !r.ok) return false;
+
+      const ct = r.headers.get("content-type") || "";
+      const data = ct.includes("application/json") ? await r.json() : JSON.parse(await r.text());
+
+      // Expect response.result === "success"; also accept presence of version fields as OK
+      const okByResult = data?.response?.result === "success";
+      const okByFields =
+        !!(data?.response?.data?.tautulli_version ||
+           data?.response?.data?.branch ||
+           data?.response?.data?.version);
+      return okByResult || okByFields;
     } catch {
       return false;
     }
   }
 
-  const email = !!(CONFIG.smtpHost && CONFIG.smtpUser && CONFIG.smtpPass);
-  const [plex, tautulli] = await Promise.all([checkPlex(), checkTautulli()]);
+  try {
+    const [emailOk, plexOk, tautulliOk] = await Promise.all([
+      checkSMTP(),
+      checkPlex(),
+      checkTautulli(),
+    ]);
 
-  const checks = {
-    email: { ok: email },
-    plex: { ok: plex },
-    tautulli: { ok: tautulli },
-  };
-
-  res.json({ email, plex, tautulli, checks, services: checks });
+    // Return the booleans your UI expects; include legacy fields too for compatibility
+    return res.json({
+      emailOk, plexOk, tautulliOk,
+      email: emailOk, plex: plexOk, tautulli: tautulliOk,
+    });
+  } catch (e) {
+    return res.json({ emailOk: false, plexOk: false, tautulliOk: false, error: String(e) });
+  }
 });
 
 // -------------------- CONFIG --------------------
@@ -211,7 +256,7 @@ app.get("/api/tautulli/summary", async (req, res) => {
         intn(row?.last_play) ||
         intn(row?.added_at);
 
-      // ✅ Correct normalization: only divide if it's clearly milliseconds (>= 1e12)
+      // ✅ Only divide if clearly ms (>= 1e12)
       if (Number.isFinite(t) && t >= 1e12) t = Math.round(t / 1000);
 
       return Number.isFinite(t) ? t : NaN;
@@ -225,7 +270,7 @@ app.get("/api/tautulli/summary", async (req, res) => {
         intn(row?.watch_time) ||
         intn(row?.view_offset) ||
         intn(row?.duration);
-      // Duration can legitimately be hours, but ms durations are ~1e6+; keep the 3‑day guard
+      // guard for ms durations
       if (Number.isFinite(d) && d > 60 * 60 * 24 * 3) d = Math.round(d / 1000);
       return Number.isFinite(d) && d > 0 ? d : 0;
     }

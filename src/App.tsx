@@ -7,7 +7,7 @@ import OwnerRecommendationCard from "./components/OwnerRecommendationCard";
 import ScheduleCard, { type ScheduleCardHandle } from "./components/ScheduleCard";
 import HistoryCard from "./components/HistoryCard";
 import RecipientsCard from "./components/RecipientsCard";
-import { getStatus } from "./api";
+import { getStatus, getConfig } from "./api";
 
 type ConnStatus = {
   emailOk: boolean;
@@ -38,29 +38,22 @@ export default function App() {
   const [statusLoading, setStatusLoading] = React.useState(false);
   const [statusError, setStatusError] = React.useState<string | null>(null);
 
-  // helper: read either flat or nested { ok } or legacy *Ok keys
-  const readOk = React.useCallback((s: any, key: "email" | "plex" | "tautulli") => {
-    return Boolean(
-      s?.[key] ?? s?.checks?.[key]?.ok ?? s?.services?.[key]?.ok ?? s?.[`${key}Ok`]
-    );
-  }, []);
-
   const refreshStatus = React.useCallback(async () => {
     try {
       setStatusLoading(true);
       setStatusError(null);
       const s = await getStatus();
       setConnStatus({
-        emailOk: readOk(s, "email"),
-        plexOk: readOk(s, "plex"),
-        tautulliOk: readOk(s, "tautulli"),
+        emailOk: !!s?.emailOk,
+        plexOk: !!s?.plexOk,
+        tautulliOk: !!s?.tautulliOk,
       });
     } catch (e: any) {
       setStatusError(e?.message || String(e));
     } finally {
       setStatusLoading(false);
     }
-  }, [readOk]);
+  }, []);
 
   // initial load
   React.useEffect(() => {
@@ -85,6 +78,27 @@ export default function App() {
     setShowConn(false);
     refreshStatus();
   };
+
+  // --- NEW: history lookback (days) shared between HistoryCard and Plex card ---
+  const [historyDays, setHistoryDays] = React.useState<number>(7);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const cfg = await getConfig();
+        const d = typeof (cfg as any)?.lookbackDays === "number" ? (cfg as any).lookbackDays : 7;
+        if (!cancelled) setHistoryDays(d);
+      } catch {
+        // ignore, keep default 7
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const onHistoryDaysChange = React.useCallback((d: number) => {
+    setHistoryDays(d);
+  }, []);
 
   return (
     <div className="min-h-screen bg-base-100 text-base-content">
@@ -169,15 +183,15 @@ export default function App() {
             </div>
           </div>
 
-          {/* History — add same hover blue ring cue (visual only) */}
-          <div className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition">
+          {/* History */}
+          <div className="card bg-base-200 shadow-sm card-compact">
             <div className="card-body p-3">
               <h2 className="card-title text-base md:text-xl">History</h2>
               <p className="text-xs md:text-sm opacity-70">
                 How many days to pull data for the newsletter
               </p>
               <div className="mt-3 text-sm">
-                <HistoryCard />
+                <HistoryCard onDaysChange={onHistoryDaysChange} />
               </div>
             </div>
           </div>
@@ -186,9 +200,11 @@ export default function App() {
         {/* Plex Media Server Data */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="card-title text-base">Plex Media Server Data (Last 7 days)</h2>
+            <h2 className="card-title text-base">
+              Plex Media Server Data (Last {historyDays} day{historyDays === 1 ? "" : "s"})
+            </h2>
             <div className="mt-2">
-              <PlexMediaServerDataCard />
+              <PlexMediaServerDataCard days={historyDays} />
             </div>
           </div>
         </section>
