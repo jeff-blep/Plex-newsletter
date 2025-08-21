@@ -71,14 +71,20 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     setLoading(true);
     setErr(null);
     fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`)
-      .then(r => {
+      .then(async (r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        return r.json();
+        const j = (await r.json()) as Summary & { debug?: any };
+        // --- DEV instrumentation: see what the UI actually got ---
+        if (import.meta.env?.DEV) {
+          // eslint-disable-next-line no-console
+          console.log("[PlexMediaServerDataCard] summary response:", j);
+        }
+        return j;
       })
-      .then((j: Summary) => {
+      .then((j) => {
         if (!cancelled) setSummary(j);
       })
-      .catch(e => !cancelled && setErr(e?.message || String(e)))
+      .catch((e) => !cancelled && setErr(e?.message || String(e)))
       .finally(() => !cancelled && setLoading(false));
     return () => { cancelled = true; };
   }, [days]);
@@ -96,6 +102,10 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     [summary]
   );
 
+  const movies = summary?.totals?.movies ?? 0;
+  const episodes = summary?.totals?.episodes ?? 0;
+  const totalSecs = summary?.totals?.total_time_seconds ?? 0;
+
   return (
     // No inner card chrome — content only to live inside the outer (blue) card
     <div className="space-y-4">
@@ -110,19 +120,26 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       )}
 
+      {/* DEV-only tiny debug line so we can confirm what the UI is seeing */}
+      {import.meta.env?.DEV && (
+        <div className="opacity-60 text-xs">
+          DEBUG totals (UI): movies={movies} episodes={episodes} secs={totalSecs}
+        </div>
+      )}
+
       {/* Summary strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>🎬</span> Movies Streamed</div>
-          <div className="text-2xl font-semibold">{summary?.totals?.movies ?? "—"}</div>
+          <div className="text-2xl font-semibold">{movies}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>📺</span> TV Episodes Streamed</div>
-          <div className="text-2xl font-semibold">{summary?.totals?.episodes ?? "—"}</div>
+          <div className="text-2xl font-semibold">{episodes}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>⏱️</span> Total Hours Streamed</div>
-          <div className="text-2xl font-semibold">{hhmm(summary?.totals?.total_time_seconds)}</div>
+          <div className="text-2xl font-semibold">{hhmm(totalSecs)}</div>
         </div>
       </div>
 

@@ -41,13 +41,7 @@ export default function App() {
   // helper: read either flat or nested { ok } or legacy *Ok keys
   const readOk = React.useCallback((s: any, key: "email" | "plex" | "tautulli") => {
     return Boolean(
-      // new flat booleans
-      s?.[key] ??
-      // nested shapes we added server-side
-      s?.checks?.[key]?.ok ??
-      s?.services?.[key]?.ok ??
-      // legacy shape some earlier code used
-      s?.[`${key}Ok`]
+      s?.[key] ?? s?.checks?.[key]?.ok ?? s?.services?.[key]?.ok ?? s?.[`${key}Ok`]
     );
   }, []);
 
@@ -175,8 +169,8 @@ export default function App() {
             </div>
           </div>
 
-          {/* History */}
-          <div className="card bg-base-200 shadow-sm card-compact">
+          {/* History — add same hover blue ring cue (visual only) */}
+          <div className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition">
             <div className="card-body p-3">
               <h2 className="card-title text-base md:text-xl">History</h2>
               <p className="text-xs md:text-sm opacity-70">
