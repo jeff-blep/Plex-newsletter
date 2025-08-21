@@ -34,7 +34,7 @@ function toSecure(enc?: SMTPEnc): boolean {
   return enc === "TLS/SSL";
 }
 
-/** -------- GET config (map server -> UI fields) -------- */
+/** ---------------- Connections: config ---------------- */
 export async function getConfig() {
   const data = await j<any>("/api/config");
   // Server keys: smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress, plexUrl, plexToken, tautulliUrl, tautulliApiKey
@@ -53,7 +53,6 @@ export async function getConfig() {
   };
 }
 
-/** -------- POST config (map UI -> server fields) -------- */
 export async function postConfig(body: {
   plexUrl?: string;
   plexToken?: string;
@@ -94,12 +93,12 @@ export async function postConfig(body: {
   });
 }
 
-/** -------- Status for the card -------- */
+/** ---------------- Connections: status for the card ---------------- */
 export async function getStatus() {
   return j("/api/status");
 }
 
-/** -------- Tests (use slashed routes) -------- */
+/** ---------------- Connection tests (slashed routes) ---------------- */
 export async function testPlex(body?: { plexUrl?: string; plexToken?: string }) {
   return j("/api/test/plex", {
     method: "POST",
@@ -148,5 +147,29 @@ export async function testSmtp(body?: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(serverBody),
+  });
+}
+
+/** =================== SCHEDULE =================== */
+/** GET saved schedule for the card + modal */
+export async function getSchedule() {
+  // Expecting server to return something like:
+  // { dayOfWeek: 1, hour: 9, minute: 0, timezone: "America/Los_Angeles" }
+  // or possibly { cron: "...", timezone: "..." }
+  return j("/api/schedule");
+}
+
+/** POST schedule (modal save) */
+export async function postSchedule(body: {
+  dayOfWeek?: number; // 0=Sun..6=Sat
+  hour?: number;      // 0..23
+  minute?: number;    // 0..59
+  timezone?: string;  // optional
+  cron?: string;      // if your server supports cron directly
+}) {
+  return j("/api/schedule", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
   });
 }

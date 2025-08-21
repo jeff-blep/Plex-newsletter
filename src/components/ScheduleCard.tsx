@@ -5,13 +5,13 @@ import React, {
   forwardRef,
   useImperativeHandle,
 } from "react";
-import { postConfig } from "../api";
+import { postConfig, getSchedule as apiGetSchedule, getConfig as apiGetConfig } from "../api";
 
 type Schedule = {
   mode?: "standard" | "custom";
   cron?: string;
   frequency?: "hour" | "day" | "week" | "month" | "year";
-  dayOfWeek?: string;
+  dayOfWeek?: string; // e.g., "monday"
   dayOfMonth?: number;
   month?: number;
   hour?: number;   // 0-23
@@ -27,6 +27,104 @@ type Props = {
   save?: (partial: { schedule: Schedule }) => Promise<void> | void;
 };
 
+const DAYS = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
+const HOURS12 = Array.from({ length: 12 }, (_, i) => i + 1);
+const MINUTES = Array.from({ length: 12 }, (_, i) => i * 5);
+const DAYS_OF_MONTH = Array.from({ length: 31 }, (_, i) => i + 1);
+const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+
+const LS_KEY = "schedule";
+
+function to24h(hour12: number, ampm: "AM" | "PM") {
+  return ampm === "AM" ? hour12 % 12 : (hour12 % 12) + 12;
+}
+
+function isConfigured(s: Schedule | null): boolean {
+  const x = s || {};
+  if (x?.mode === "custom" && x?.cron && String(x.cron).trim()) return true;
+  return Boolean(x?.frequency);
+}
+
+function describeSchedule(s: Schedule | null): string {
+  const x = s || {};
+  if (x?.mode === "custom" && x?.cron) {
+    return `Custom CRON: ${x.cron}`;
+  }
+  if (x?.frequency) {
+    const freq = String(x.frequency).toLowerCase();
+    const hh = typeof x.hour === "number" ? x.hour : 9;
+    const mm = typeof x.minute === "number" ? x.minute : 0;
+    const ampm = hh >= 12 ? "PM" : "AM";
+    const hour12 = ((hh + 11) % 12) + 1;
+    const t = `${hour12}:${String(mm).padStart(2, "0")} ${ampm}`;
+    if (freq === "week") {
+      const dow = (x.dayOfWeek || "monday").toString();
+      const label = dow[0].toUpperCase() + dow.slice(1);
+      return `${label}s at ${t}`;
+    }
+    if (freq === "hour") return `Every hour at minute ${mm}`;
+    if (freq === "month") return `Day ${x.dayOfMonth || 1} each month at ${t}`;
+    if (freq === "year") return `Every ${MONTHS[x.month || 0]} 1 at ${t}`;
+    return `Daily at ${t}`;
+  }
+  return "Schedule not set";
+}
+
+/** Normalize whatever the server returns into our local Schedule shape. */
+function normalizeServerSchedule(raw: any): Schedule | null {
+  if (!raw) return null;
+  const data = raw && raw.schedule ? raw.schedule : raw;
+  if (typeof data !== "object" || data === null) return null;
+
+  if (typeof data.cron === "string" && data.cron.trim().length > 0) {
+    return { mode: "custom", cron: data.cron };
+  }
+
+  const out: Schedule = { mode: "standard" };
+
+  if (typeof data.frequency === "string") {
+    const f = data.frequency.toLowerCase();
+    if (["hour", "day", "week", "month", "year"].includes(f)) {
+      out.frequency = f as Schedule["frequency"];
+    }
+  }
+
+  if (typeof data.hour === "number") out.hour = data.hour;
+  if (typeof data.minute === "number") out.minute = data.minute;
+
+  if (typeof data.dayOfWeek === "number" && data.dayOfWeek >= 0 && data.dayOfWeek <= 6) {
+    out.dayOfWeek = DAYS[data.dayOfWeek];
+  } else if (typeof data.dayOfWeek === "string" && data.dayOfWeek.length > 0) {
+    out.dayOfWeek = data.dayOfWeek.toLowerCase();
+  }
+
+  if (typeof data.dayOfMonth === "number") out.dayOfMonth = data.dayOfMonth;
+  if (typeof data.month === "number") out.month = data.month;
+
+  return isConfigured(out) ? out : null;
+}
+
+/** Load from localStorage (if present and valid) */
+function loadLocalSchedule(): Schedule | null {
+  try {
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return normalizeServerSchedule(parsed);
+  } catch {
+    return null;
+  }
+}
+
+/** Save to localStorage */
+function saveLocalSchedule(s: Schedule) {
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify({ schedule: s }));
+  } catch {
+    // ignore
+  }
+}
+
 const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
   ({ schedule: scheduleProp, save }, ref) => {
     const [open, setOpen] = useState(false);
@@ -34,55 +132,55 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
 
-    // Local mirror so this component works standalone too
-    const [schedule, setSchedule] = useState<Schedule | null>(
-      scheduleProp ?? null
-    );
+    const [schedule, setSchedule] = useState<Schedule | null>(scheduleProp ?? null);
     useEffect(() => {
       setSchedule(scheduleProp ?? null);
     }, [scheduleProp]);
 
-    // ---------------- Utils ----------------
-    const DAYS = ["sunday","monday","tuesday","wednesday","thursday","friday","saturday"];
-    const HOURS12 = Array.from({ length: 12 }, (_, i) => i + 1);
-    const MINUTES = Array.from({ length: 12 }, (_, i) => i * 5);
-    const DAYS_OF_MONTH = Array.from({ length: 31 }, (_, i) => i + 1);
-    const MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
+    // -------- Load order on mount: localStorage → /api/schedule → /api/config --------
+    useEffect(() => {
+      let alive = true;
 
-    function to24h(hour12: number, ampm: "AM" | "PM") {
-      return ampm === "AM" ? hour12 % 12 : (hour12 % 12) + 12;
-    }
+      const ls = loadLocalSchedule();
+      if (ls && alive) setSchedule(ls);
 
-    function isConfigured(s: Schedule | null): boolean {
-      const x = s || {};
-      if (x?.mode === "custom" && x?.cron && String(x.cron).trim()) return true;
-      return Boolean(x?.frequency);
-    }
-
-    function describeSchedule(s: Schedule | null): string {
-      const x = s || {};
-      if (x?.mode === "custom" && x?.cron) {
-        return `Custom CRON: ${x.cron}`;
-      }
-      if (x?.frequency) {
-        const freq = String(x.frequency).toLowerCase();
-        const hh = typeof x.hour === "number" ? x.hour : 9;
-        const mm = typeof x.minute === "number" ? x.minute : 0;
-        const ampm = hh >= 12 ? "PM" : "AM";
-        const hour12 = ((hh + 11) % 12) + 1;
-        const t = `${hour12}:${String(mm).padStart(2, "0")} ${ampm}`;
-        if (freq === "week") {
-          const dow = (x.dayOfWeek || "monday").toString();
-          const label = dow[0].toUpperCase() + dow.slice(1);
-          return `${label}s at ${t}`;
+      (async () => {
+        try {
+          let data: any = null;
+          try {
+            data = await apiGetSchedule(); // may not exist
+          } catch {
+            data = null;
+          }
+          if (!data) {
+            try {
+              const cfg = await apiGetConfig();
+              data = cfg?.schedule ? { schedule: cfg.schedule } : null;
+            } catch {
+              data = null;
+            }
+          }
+          if (!alive) return;
+          const normalized = normalizeServerSchedule(data);
+          if (normalized) {
+            setSchedule(normalized);
+            saveLocalSchedule(normalized);
+          }
+        } catch {
+          // swallow
         }
-        if (freq === "hour") return `Every hour at minute ${mm}`;
-        if (freq === "month") return `Day ${x.dayOfMonth || 1} each month at ${t}`;
-        if (freq === "year") return `Every ${MONTHS[x.month || 0]} 1 at ${t}`;
-        return `Daily at ${t}`;
-      }
-      return "Schedule not set";
-    }
+      })();
+
+      const onKey = (e: KeyboardEvent) => {
+        if (e.key === "Escape") setOpen(false);
+      };
+      window.addEventListener("keydown", onKey);
+
+      return () => {
+        alive = false;
+        window.removeEventListener("keydown", onKey);
+      };
+    }, []);
 
     // ---------------- Edit flow ----------------
     function openEditor() {
@@ -105,6 +203,11 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
       open: () => openEditor(),
     }));
 
+    function closeModal(e?: React.SyntheticEvent) {
+      e?.stopPropagation?.();
+      setOpen(false);
+    }
+
     async function saveSchedule() {
       try {
         setSaving(true);
@@ -120,6 +223,7 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
             await postConfig({ schedule: payload });
             setSchedule(payload);
           }
+          saveLocalSchedule(payload);
           setOpen(false);
           return;
         }
@@ -146,6 +250,7 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
           await postConfig({ schedule: payload });
           setSchedule(payload);
         }
+        saveLocalSchedule(payload);
         setOpen(false);
       } catch (e: any) {
         setError(e?.message || "Failed to save schedule");
@@ -155,8 +260,6 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
     }
 
     // ---------------- View ----------------
-    // NOTE: We do not render an outer card here to avoid "card within card".
-    // Only render the center summary; the parent provides title/helper.
     return (
       <>
         {/* Entire card container clickable */}
@@ -168,8 +271,19 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
 
         {/* Modal */}
         {open && (
-          <div className="modal modal-open">
-            <div className="modal-box max-w-2xl">
+          <div
+            className="modal modal-open"
+            onClick={(e) => e.stopPropagation()}
+            onMouseDown={(e) => e.stopPropagation()}
+          >
+            <div
+              className="modal-box max-w-2xl"
+              onClick={(e) => e.stopPropagation()}
+              onMouseDown={(e) => e.stopPropagation()}
+              role="dialog"
+              aria-modal="true"
+              aria-label="Sending Schedule"
+            >
               <h3 className="font-bold text-lg mb-2">Sending Schedule</h3>
               <p className="text-sm opacity-70 mb-4">
                 Choose when the newsletter is sent automatically.
@@ -301,7 +415,7 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
               {error && <div className="mt-3 text-error text-sm">{error}</div>}
 
               <div className="modal-action">
-                <button className="btn" onClick={() => setOpen(false)} disabled={saving}>
+                <button className="btn" onClick={closeModal} disabled={saving}>
                   Cancel
                 </button>
                 <button className="btn btn-primary" onClick={saveSchedule} disabled={saving}>
@@ -309,7 +423,9 @@ const ScheduleCard = forwardRef<ScheduleCardHandle, Props>(
                 </button>
               </div>
             </div>
-            <div className="modal-backdrop" onClick={() => setOpen(false)}></div>
+
+            {/* Backdrop closes */}
+            <div className="modal-backdrop" onClick={closeModal} />
           </div>
         )}
       </>

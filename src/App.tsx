@@ -1,3 +1,4 @@
+// src/App.tsx
 import React from "react";
 import ConnectionSettingsModal from "./components/ConnectionSettingsModal";
 import PlexMediaServerDataCard from "./components/PlexMediaServerDataCard";
@@ -5,6 +6,13 @@ import OwnerRecommendationCard from "./components/OwnerRecommendationCard";
 import ScheduleCard, { type ScheduleCardHandle } from "./components/ScheduleCard";
 import HistoryCard from "./components/HistoryCard";
 import RecipientsCard from "./components/RecipientsCard";
+import { getStatus } from "./api";
+
+type ConnStatus = {
+  emailOk: boolean;
+  plexOk: boolean;
+  tautulliOk: boolean;
+};
 
 export default function App() {
   const [showConn, setShowConn] = React.useState(false);
@@ -19,6 +27,57 @@ export default function App() {
     document.documentElement.setAttribute("data-theme", theme);
     localStorage.setItem("theme", theme);
   }, [theme]);
+
+  // --- Connection status for the card ---
+  const [connStatus, setConnStatus] = React.useState<ConnStatus>({
+    emailOk: false,
+    plexOk: false,
+    tautulliOk: false,
+  });
+  const [statusLoading, setStatusLoading] = React.useState(false);
+  const [statusError, setStatusError] = React.useState<string | null>(null);
+
+  const refreshStatus = React.useCallback(async () => {
+    try {
+      setStatusLoading(true);
+      setStatusError(null);
+      const s = await getStatus();
+      setConnStatus({
+        emailOk: !!s?.emailOk,
+        plexOk: !!s?.plexOk,
+        tautulliOk: !!s?.tautulliOk,
+      });
+    } catch (e: any) {
+      setStatusError(e?.message || String(e));
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  // initial load
+  React.useEffect(() => {
+    refreshStatus();
+  }, [refreshStatus]);
+
+  // refresh when tab regains focus
+  React.useEffect(() => {
+    const onVis = () => {
+      if (document.visibilityState === "visible") refreshStatus();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => document.removeEventListener("visibilitychange", onVis);
+  }, [refreshStatus]);
+
+  const handleConnClose = () => {
+    setShowConn(false);
+    // small delay so any last server write completes before we pull status
+    setTimeout(() => refreshStatus(), 150);
+  };
+
+  const handleConnSaved = () => {
+    setShowConn(false);
+    refreshStatus();
+  };
 
   return (
     <div className="min-h-screen bg-base-100 text-base-content">
@@ -66,9 +125,22 @@ export default function App() {
             <div className="card-body p-3">
               <h2 className="card-title text-base md:text-xl">Connection Settings</h2>
               <p className="text-xs md:text-sm opacity-70">
-                Sender address used for the newsletter
+                Configure Email (SMTP), Plex, and Tautulli connections.
               </p>
-              <div className="mt-8" />
+
+              <div className="mt-6 text-sm md:text-base">
+                {statusLoading ? (
+                  <div className="opacity-70">Checking status…</div>
+                ) : statusError ? (
+                  <div className="text-red-400">Failed to load status: {statusError}</div>
+                ) : (
+                  <div className="space-y-1">
+                    <div>Email: {connStatus.emailOk ? "✅" : "❌"}</div>
+                    <div>Plex: {connStatus.plexOk ? "✅" : "❌"}</div>
+                    <div>Tautulli: {connStatus.tautulliOk ? "✅" : "❌"}</div>
+                  </div>
+                )}
+              </div>
             </div>
           </div>
 
@@ -119,8 +191,8 @@ export default function App() {
 
       <ConnectionSettingsModal
         isOpen={showConn}
-        onClose={() => setShowConn(false)}
-        onSaved={() => setShowConn(false)}
+        onClose={handleConnClose}
+        onSaved={handleConnSaved}
       />
     </div>
   );
