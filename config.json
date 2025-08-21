@@ -1,0 +1,18 @@
+{
+  "smtpHost": "",
+  "smtpPort": 587,
+  "smtpSecure": false,
+  "smtpUser": "",
+  "smtpPass": "",
+  "fromAddress": "",
+  "plexUrl": "http://10.0.1.2:32400",
+  "plexToken": "jttz21XYh9sm8M55wenE",
+  "tautulliUrl": "http://10.0.1.2:8181",
+  "tautulliApiKey": "10fe7cd07ce34bde809febae32daf3ea",
+  "lookbackDays": 89,
+  "lastTest": {
+    "plex": "ok",
+    "tautulli": "ok",
+    "smtp": "unknown"
+  }
+}
