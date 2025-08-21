@@ -1,5 +1,6 @@
 // src/App.tsx
 import React from "react";
+import { Moon, Sun } from "lucide-react";
 import ConnectionSettingsModal from "./components/ConnectionSettingsModal";
 import PlexMediaServerDataCard from "./components/PlexMediaServerDataCard";
 import OwnerRecommendationCard from "./components/OwnerRecommendationCard";
@@ -70,7 +71,6 @@ export default function App() {
 
   const handleConnClose = () => {
     setShowConn(false);
-    // small delay so any last server write completes before we pull status
     setTimeout(() => refreshStatus(), 150);
   };
 
@@ -81,17 +81,35 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-base-100 text-base-content">
-      <header className="px-5 py-3 border-b border-base-300 flex items-center justify-between">
-        <h1 className="text-lg font-semibold">Plex Newsletter • Settings</h1>
-        <button
-          className="btn btn-sm"
-          onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
-        >
-          {theme === "dark" ? "🌞 Light" : "🌙 Dark"}
-        </button>
+      {/* FIXED TOP BANNER */}
+      <header className="fixed top-0 inset-x-0 z-50 bg-base-100 border-b border-base-300">
+        <div className="px-5 py-3 flex items-center justify-between max-w-6xl mx-auto">
+          <h1 className="text-lg font-semibold truncate">
+            Newzletr • Settings
+          </h1>
+          <button
+            className="btn btn-sm"
+            onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
+            aria-label="Toggle theme"
+            title="Toggle theme"
+          >
+            {theme === "dark" ? (
+              <div className="flex items-center gap-2">
+                <Sun className="w-4 h-4 text-gray-500" />
+                <span>Light</span>
+              </div>
+            ) : (
+              <div className="flex items-center gap-2">
+                <Moon className="w-4 h-4 text-gray-500" />
+                <span>Dark</span>
+              </div>
+            )}
+          </button>
+        </div>
       </header>
 
-      <main className="max-w-6xl mx-auto p-5 space-y-6">
+      {/* Offset for fixed header */}
+      <main className="max-w-6xl mx-auto p-5 pt-14 mt-6 space-y-6">
         {/* Top row: Schedule, Connection Settings, History */}
         <section className="grid gap-4 md:grid-cols-3">
           {/* Schedule — ENTIRE CARD CLICKABLE */}
