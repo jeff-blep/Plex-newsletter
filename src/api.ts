@@ -21,7 +21,7 @@ async function j<T = any>(path: string, init?: RequestInit): Promise<T> {
   }
 }
 
-/** Map server fields -> UI encryption string */
+// Map server fields to UI encryption string
 function toEnc(smtpSecure?: boolean, port?: number): SMTPEnc {
   if (smtpSecure) return "TLS/SSL";
   if (port === 587) return "STARTTLS";
@@ -29,7 +29,7 @@ function toEnc(smtpSecure?: boolean, port?: number): SMTPEnc {
   return "STARTTLS";
 }
 
-/** Map UI encryption -> server boolean */
+// Map UI encryption to server boolean
 function toSecure(enc?: SMTPEnc): boolean {
   return enc === "TLS/SSL";
 }
@@ -46,7 +46,7 @@ export async function getConfig() {
 
     fromAddress: data.fromAddress || "",
     smtpEmailLogin: data.smtpUser || "",
-    // never return password to UI
+    // Never return password to UI
     smtpServer: data.smtpHost || "",
     smtpPort: typeof data.smtpPort === "number" ? data.smtpPort : 587,
     smtpEncryption: toEnc(!!data.smtpSecure, data.smtpPort),
@@ -61,13 +61,13 @@ export async function postConfig(body: {
 
   fromAddress?: string;
   smtpEmailLogin?: string;
-  smtpEmailPassword?: string; // optional: empty string won't change server-stored pass
+  smtpEmailPassword?: string; // optional: empty string will not change server stored password
   smtpServer?: string;
   smtpPort?: number;
   smtpEncryption?: SMTPEnc;
 }) {
   const serverBody: any = {
-    // Plex / Tautulli
+    // Plex and Tautulli
     plexUrl: body.plexUrl,
     plexToken: body.plexToken,
     tautulliUrl: body.tautulliUrl,
@@ -81,7 +81,7 @@ export async function postConfig(body: {
     smtpSecure: toSecure(body.smtpEncryption),
   };
 
-  // Only send smtpPass if non-empty so we don’t clear stored value
+  // Only send smtpPass if non-empty so we do not clear stored value
   if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0) {
     serverBody.smtpPass = body.smtpEmailPassword;
   }
@@ -151,15 +151,12 @@ export async function testSmtp(body?: {
 }
 
 /** =================== SCHEDULE =================== */
-/** GET saved schedule for the card + modal */
+// GET saved schedule for the card and modal
 export async function getSchedule() {
-  // Expecting server to return something like:
-  // { dayOfWeek: 1, hour: 9, minute: 0, timezone: "America/Los_Angeles" }
-  // or possibly { cron: "...", timezone: "..." }
   return j("/api/schedule");
 }
 
-/** POST schedule (modal save) */
+// POST schedule (modal save)
 export async function postSchedule(body: {
   dayOfWeek?: number; // 0=Sun..6=Sat
   hour?: number;      // 0..23
@@ -171,5 +168,50 @@ export async function postSchedule(body: {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+// ---------------- TAUTULLI HELPERS (via backend proxy) ----------------
+
+type TautulliResponse<T> = {
+  response: { result: "success" | "error"; data?: T; message?: string };
+};
+
+function qp(params: Record<string, any> = {}) {
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params)) {
+    if (v === undefined || v === null) continue;
+    q.set(k, String(v));
+  }
+  return q.toString();
+}
+
+// Low level helper: calls backend proxy /api/tautulli
+async function tautulli<T = any>(cmd: string, params: Record<string, any> = {}): Promise<T> {
+  const qs = qp({ cmd, ...params });
+  const data = await j<TautulliResponse<T>>(`/api/tautulli?${qs}`);
+  if (!data || !("response" in data)) throw new Error("Bad Tautulli response");
+  if (data.response.result !== "success") {
+    throw new Error(data.response.message || "Tautulli error");
+  }
+  return data.response.data as T;
+}
+
+// Convenient wrappers for the card
+export async function getTautulliAppInfo() {
+  // Modern command, replaces app_info
+  return tautulli("get_tautulli_info");
+}
+
+export async function getTautulliHomeStats() {
+  return tautulli("get_home_stats");
+}
+
+export async function getTautulliHistory(afterEpochSeconds: number, length: number = 1000) {
+  return tautulli("get_history", {
+    after: afterEpochSeconds,
+    length,
+    order_column: "date",
+    order_dir: "desc",
   });
 }

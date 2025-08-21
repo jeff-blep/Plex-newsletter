@@ -44,6 +44,9 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
   const [fromAddress, setFromAddress] = useState("");
   const [sendTestTo, setSendTestTo] = useState("");
 
+  // NEW: Track if a password already exists server-side (without revealing it)
+  const [hasSavedPassword, setHasSavedPassword] = useState(false);
+
   useEffect(() => {
     if (!isOpen) return;
     (async () => {
@@ -62,7 +65,11 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
         setSmtpServer(cfg.smtpServer || "");
         setSmtpPort(typeof cfg.smtpPort === "number" ? cfg.smtpPort : 587);
         setSmtpEncryption(cfg.smtpEncryption || "TLS/SSL");
-        setSmtpEmailPassword(""); // never prefill
+
+        // If we have enough SMTP fields to have previously worked, assume a password exists.
+        // We do NOT read the password from the server for security.
+        setHasSavedPassword(!!(cfg.smtpEmailLogin || cfg.smtpServer));
+        setSmtpEmailPassword(""); // keep input blank; we only send if user types a new one
       } catch (e: any) {
         setError(e?.message || String(e));
       } finally {
@@ -83,11 +90,17 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
         tautulliApiKey,
         fromAddress,
         smtpEmailLogin,
-        smtpEmailPassword, // server should ignore empty strings
+        // Only send smtpEmailPassword if the user typed something.
+        // If blank, backend keeps existing smtpPass in config.json.
+        smtpEmailPassword: smtpEmailPassword.length > 0 ? smtpEmailPassword : undefined,
         smtpServer,
         smtpPort,
         smtpEncryption,
       });
+      if (smtpEmailPassword.length > 0) {
+        setHasSavedPassword(true);
+        setSmtpEmailPassword(""); // clear the input after successful save
+      }
       setNotice("Settings saved.");
       onSaved?.();
     } catch (e: any) {
@@ -113,7 +126,8 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
       } else {
         const r = await testSmtp({
           smtpEmailLogin,
-          smtpEmailPassword,
+          // Only send a password for testing if user typed something; otherwise the server uses stored pass.
+          smtpEmailPassword: smtpEmailPassword.length > 0 ? smtpEmailPassword : undefined,
           smtpServer,
           smtpPort,
           smtpEncryption,
@@ -137,7 +151,7 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
     try {
       const r = await testSmtp({
         smtpEmailLogin,
-        smtpEmailPassword,
+        smtpEmailPassword: smtpEmailPassword.length > 0 ? smtpEmailPassword : undefined,
         smtpServer,
         smtpPort,
         smtpEncryption,
@@ -191,7 +205,7 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
               <input
                 type="password"
                 className="input input-bordered w-full"
-                placeholder="Password"
+                placeholder={hasSavedPassword ? "Password (saved)" : "Password"}
                 value={smtpEmailPassword}
                 onChange={(e) => setSmtpEmailPassword(e.target.value)}
               />
@@ -233,9 +247,8 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
               />
             </div>
 
-            {/* Row 4: Buttons under TLS/SSL (half width) | Send Test To under Port (full width) */}
+            {/* Row 4: Buttons under TLS/SSL | Send Test To */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              {/* Left (under TLS/SSL): two half-width buttons */}
               <div className="grid grid-cols-2 gap-2">
                 <button
                   className={`btn ${testing === "smtp" ? "btn-disabled" : "btn-primary"}`}
@@ -249,7 +262,6 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
                 </button>
               </div>
 
-              {/* Right (under Port): wide input */}
               <input
                 className="input input-bordered w-full"
                 placeholder="Send Test To (email)"
