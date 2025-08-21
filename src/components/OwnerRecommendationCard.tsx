@@ -14,8 +14,8 @@ type SearchResult = {
   episodeTitle?: string;
   seasonIndex?: number;
   episodeIndex?: number;
-  thumb?: string;      // full URL
-  thumbPath?: string;  // e.g. /library/metadata/.../thumb/...
+  thumb?: string;
+  thumbPath?: string;
   grandparentThumb?: string;
   parentThumb?: string;
   art?: string;
@@ -29,7 +29,6 @@ function normNum(n: any): number | undefined {
 }
 
 function pickThumbPath(it: any): string | undefined {
-  // Prefer the smallest poster-like asset
   return (
     it?.thumbPath ||
     it?.thumb ||
@@ -42,8 +41,6 @@ function pickThumbPath(it: any): string | undefined {
   );
 }
 
-// Some Plex endpoints return { MediaContainer: { Metadata: [ ... ] } } or { Metadata: [ ... ] }
-// Unwrap to a single item object when possible.
 function unwrapPlexNode(raw: any): any {
   if (!raw) return raw;
   const mc = raw.MediaContainer ?? raw.mediacontainer;
@@ -76,10 +73,8 @@ function normalizeItem(input: any): SearchResult {
     normNum(raw.originallyAvailableAt?.slice?.(0, 4)) ??
     undefined;
 
-  // Try hard to determine type
   let type: string | undefined = (raw.type ?? raw.librarySectionType ?? raw.media_type) as any;
   if (!type) {
-    // Heuristics
     if (raw.grandparent_title || raw.grandparentTitle) type = "episode";
   }
 
@@ -93,7 +88,6 @@ function normalizeItem(input: any): SearchResult {
     raw.parent_name ??
     undefined;
 
-  // Prefer the *episode* title when the object is an episode
   const episodeTitle = raw.type === "episode" ? (raw.title ?? raw.episodeTitle) : (raw.episodeTitle ?? undefined);
 
   const seasonIndex =
@@ -141,13 +135,11 @@ function normalizeItem(input: any): SearchResult {
 }
 
 async function enrichEpisodes(base: SearchResult[]): Promise<SearchResult[]> {
-  // If we can't confidently format an item (missing show/se/ep for an episode),
-  // fetch canonical details for up to 12 candidates to enrich the label.
   const candidates = base
     .map((r, idx) => ({ r, idx }))
     .filter(({ r }) => {
       const t = String(r.type || "").toLowerCase();
-      const isEp = t === "episode" || (!!r.ratingKey && !t); // unclear type → try enrich
+      const isEp = t === "episode" || (!!r.ratingKey && !t);
       const missingBits = !r.showTitle || r.seasonIndex == null || r.episodeIndex == null;
       return isEp && missingBits;
     })
@@ -161,7 +153,6 @@ async function enrichEpisodes(base: SearchResult[]): Promise<SearchResult[]> {
         const resp = await fetch(`http://localhost:5174/plex/item/${encodeURIComponent(String(r.ratingKey))}`);
         if (!resp.ok) return null;
         const j = await resp.json();
-        // server might return { ok, item } or raw Plex structures; normalize handles both
         const full = j?.item ? normalizeItem(j.item) : normalizeItem(j);
         return full ? { idx, full } : null;
       } catch {
@@ -185,7 +176,6 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
   );
   const [selectedItem, setSelectedItem] = React.useState<SearchResult | null>(null);
 
-  // Load existing selected item details (if any)
   React.useEffect(() => {
     const id = config?.ownerRecommendation?.plexItemId;
     setSelectedId(id);
@@ -211,7 +201,6 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
     })();
   }, [config?.ownerRecommendation?.plexItemId]);
 
-  // Debounced search across ALL libraries
   React.useEffect(() => {
     const q = query.trim();
     if (q.length < 2) {
@@ -240,7 +229,6 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
   }, [query]);
 
   async function chooseItem(it: SearchResult) {
-    // Show something immediately
     const immediate = normalizeItem(it);
     setSelectedItem(immediate);
 
@@ -248,7 +236,6 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
     setSelectedId(id);
     await save({ ownerRecommendation: { plexItemId: id, note } });
 
-    // Then fetch canonical item details to enrich thumb/title if needed
     try {
       const r = await fetch(`http://localhost:5174/plex/item/${encodeURIComponent(String(id))}`);
       if (r.ok) {
@@ -270,8 +257,6 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
     if (!it) return undefined;
     const p = pickThumbPath(it);
     if (!p) return undefined;
-
-    // If it's a relative Plex media path, use ?path= ; if it's an absolute URL, use ?u=
     if (typeof p === "string" && p.startsWith("/")) {
       return `http://localhost:5174/plex/image?path=${encodeURIComponent(p)}`;
     }
@@ -289,111 +274,103 @@ export default function OwnerRecommendationCard({ config, save }: Props) {
       : undefined;
 
   return (
-    <div className="card bg-base-100 shadow">
-      <div className="card-body">
-        <div className="flex items-center justify-between">
-          <h2 className="card-title">Owner Recommendation</h2>
-          {/* No Enabled toggle; no Movie/TV toggle */}
+    // CONTENT‑ONLY: no inner card, no title
+    <div className="space-y-4">
+      <div className="grid grid-cols-1 md:grid-cols-[120px_1fr] gap-4">
+        {/* Preview poster + title */}
+        <div className="flex flex-col items-center">
+          {posterSrc ? (
+            <img
+              src={posterSrc}
+              alt=""
+              className="w-24 h-36 object-cover rounded border border-base-300"
+            />
+          ) : (
+            <div className="w-24 h-36 rounded bg-base-200 border border-base-300" />
+          )}
+          <div className="mt-2 text-center text-sm min-h-[1.25rem]">
+            {selectedItem && titleText ? (
+              deepHref(selectedItem) ? (
+                <a
+                  href={deepHref(selectedItem)}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="link"
+                  title={titleText}
+                >
+                  {titleText}
+                </a>
+              ) : (
+                <span title={titleText}>{titleText}</span>
+              )
+            ) : (
+              <span className="opacity-60">No selection</span>
+            )}
+          </div>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-[120px_1fr] gap-4">
-          {/* Preview poster + title */}
-          <div className="flex flex-col items-center">
-            {posterSrc ? (
-              <img
-                src={posterSrc}
-                alt=""
-                className="w-24 h-36 object-cover rounded border border-base-300"
-              />
-            ) : (
-              <div className="w-24 h-36 rounded bg-base-200 border border-base-300" />
-            )}
-            <div className="mt-2 text-center text-sm min-h-[1.25rem]">
-              {selectedItem && titleText ? (
-                deepHref(selectedItem) ? (
-                  <a
-                    href={deepHref(selectedItem)}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="link"
-                    title={titleText}
-                  >
-                    {titleText}
-                  </a>
-                ) : (
-                  <span title={titleText}>{titleText}</span>
-                )
-              ) : (
-                <span className="opacity-60">No selection</span>
-              )}
+        {/* Search + note */}
+        <div className="space-y-3">
+          <label className="form-control">
+            <div className="label">
+              <span className="label-text">Search title (movies &amp; shows)</span>
             </div>
-          </div>
+            <input
+              type="text"
+              className="input input-bordered"
+              placeholder="Start typing to search…"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+            />
+          </label>
 
-          {/* Search + note */}
-          <div className="space-y-3">
-            <label className="form-control">
-              <div className="label">
-                <span className="label-text">Search title (movies &amp; shows)</span>
-              </div>
-              <input
-                type="text"
-                className="input input-bordered"
-                placeholder="Start typing to search…"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-              />
-            </label>
+          {searching ? (
+            <div className="text-sm opacity-70">Searching…</div>
+          ) : results.length > 0 ? (
+            <div className="border border-base-300 rounded">
+              <ul className="menu bg-base-100 max-h-56 overflow-auto">
+                {results.map((r, i) => {
+                  let label: string;
+                  const t = String(r.type || "").toLowerCase();
+                  if (t === "episode") {
+                    const show = r.showTitle || undefined;
+                    const epName = r.episodeTitle || r.title || "(untitled episode)";
+                    const s = r.seasonIndex ? `Season ${r.seasonIndex}` : null;
+                    const e = r.episodeIndex ? `Episode ${r.episodeIndex}` : null;
+                    const se = s && e ? `${s}, ${e}` : s || e || "";
+                    label = show
+                      ? `${show} - ${epName}${se ? ` (${se})` : ""} • EPISODE`
+                      : `${epName}${se ? ` (${se})` : ""} • EPISODE`;
+                  } else {
+                    label = `${r.title || "(untitled)"}${r.year ? ` (${r.year})` : ""} ${r.type ? `• ${String(r.type).toUpperCase()}` : ""}`;
+                  }
+                  return (
+                    <li key={`${r.ratingKey}-${i}`}>
+                      <button className="justify-start" onClick={() => chooseItem(r)} title={String(r.ratingKey)}>
+                        <div className="flex items-center gap-2">
+                          <span className="truncate">{label}</span>
+                        </div>
+                      </button>
+                    </li>
+                  );
+                })}
+              </ul>
+            </div>
+          ) : query.trim().length >= 2 ? (
+            <div className="text-sm opacity-70">No results.</div>
+          ) : null}
 
-            {searching ? (
-              <div className="text-sm opacity-70">Searching…</div>
-            ) : results.length > 0 ? (
-              <div className="border border-base-300 rounded">
-                <ul className="menu bg-base-100 max-h-56 overflow-auto">
-                  {results.map((r, i) => {
-                    let label: string;
-                    const t = String(r.type || "").toLowerCase();
-                    if (t === "episode") {
-                      const show = r.showTitle || undefined;
-                      const epName = r.episodeTitle || r.title || "(untitled episode)";
-                      const s = r.seasonIndex ? `Season ${r.seasonIndex}` : null;
-                      const e = r.episodeIndex ? `Episode ${r.episodeIndex}` : null;
-                      const se = s && e ? `${s}, ${e}` : s || e || "";
-                      if (show) {
-                        label = `${show} - ${epName}${se ? ` (${se})` : ""} • EPISODE`;
-                      } else {
-                        label = `${epName}${se ? ` (${se})` : ""} • EPISODE`;
-                      }
-                    } else {
-                      label = `${r.title || "(untitled)"}${r.year ? ` (${r.year})` : ""} ${r.type ? `• ${String(r.type).toUpperCase()}` : ""}`;
-                    }
-                    return (
-                      <li key={`${r.ratingKey}-${i}`}>
-                        <button className="justify-start" onClick={() => chooseItem(r)} title={String(r.ratingKey)}>
-                          <div className="flex items-center gap-2">
-                            <span className="truncate">{label}</span>
-                          </div>
-                        </button>
-                      </li>
-                    );
-                  })}
-                </ul>
-              </div>
-            ) : query.trim().length >= 2 ? (
-              <div className="text-sm opacity-70">No results.</div>
-            ) : null}
-
-            <label className="form-control">
-              <div className="label">
-                <span className="label-text">Owner note (optional)</span>
-              </div>
-              <textarea
-                className="textarea textarea-bordered h-20"
-                placeholder="Describe why you are recommending this"
-                value={note}
-                onChange={(e) => saveNote(e.target.value)}
-              />
-            </label>
-          </div>
+          <label className="form-control">
+            <div className="label">
+              <span className="label-text">Owner note (optional)</span>
+            </div>
+            <textarea
+              className="textarea textarea-bordered h-20"
+              placeholder="Describe why you are recommending this"
+              value={note}
+              onChange={(e) => saveNote(e.target.value)}
+            />
+          </label>
         </div>
       </div>
     </div>
