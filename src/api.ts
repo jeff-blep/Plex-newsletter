@@ -118,6 +118,7 @@ export async function getStatus() {
     tautulliOk: !!(raw.tautulliOk ?? raw.tautulli ?? raw.checks?.tautulli?.ok),
   };
 }
+
 /** ---------------- Connection tests (slashed routes) ---------------- */
 export async function testPlex(body?: { plexUrl?: string; plexToken?: string }) {
   return j("/api/test/plex", {
@@ -231,4 +232,9 @@ export async function getTautulliHistory(afterEpochSeconds: number, length: numb
     order_column: "date",
     order_dir: "desc",
   });
+}
+
+/** NEW: libraries table for counts */
+export async function getTautulliLibrariesTable() {
+  return tautulli("get_libraries_table");
 }

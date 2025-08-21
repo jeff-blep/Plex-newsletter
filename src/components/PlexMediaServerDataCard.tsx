@@ -1,5 +1,6 @@
 // src/components/PlexMediaServerDataCard.tsx
 import React, { useEffect, useMemo, useState } from "react";
+import { getTautulliLibrariesTable } from "../api";
 
 type HomeRow = Record<string, any>;
 type HomeBlock = { stat_id?: string; stat_title?: string; rows?: HomeRow[] };
@@ -28,6 +29,11 @@ function hhmm(secs?: number): string {
   const h = Math.floor(s / 3600);
   const m = Math.round((s % 3600) / 60);
   return `${h} Hours ${m} Minutes`;
+}
+
+function fmt(n?: number) {
+  if (typeof n !== "number" || !Number.isFinite(n)) return "—";
+  return n.toLocaleString();
 }
 
 const PLATFORM_ICON: Record<string, string> = {
@@ -66,26 +72,52 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
 
+  // NEW: Library totals (movies / series / episodes)
+  const [libTotals, setLibTotals] = useState<{ movies: number; series: number; episodes: number }>({
+    movies: 0, series: 0, episodes: 0,
+  });
+
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setErr(null);
+
+    // Fetch the card summary (already wired server-side)
     fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`)
-      .then(async (r) => {
+      .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const j = (await r.json()) as Summary & { debug?: any };
-        // --- DEV instrumentation: see what the UI actually got ---
-        if (import.meta.env?.DEV) {
-          // eslint-disable-next-line no-console
-          console.log("[PlexMediaServerDataCard] summary response:", j);
-        }
-        return j;
+        return r.json();
       })
-      .then((j) => {
+      .then((j: Summary) => {
         if (!cancelled) setSummary(j);
       })
-      .catch((e) => !cancelled && setErr(e?.message || String(e)))
+      .catch(e => !cancelled && setErr(e?.message || String(e)))
       .finally(() => !cancelled && setLoading(false));
+
+    // Fetch library counts directly from Tautulli
+    (async () => {
+      try {
+        const t = await getTautulliLibrariesTable();
+        // Shape: { data: [...] }
+        const rows: any[] = Array.isArray((t as any)?.data) ? (t as any).data : [];
+        let movies = 0, series = 0, episodes = 0;
+        for (const row of rows) {
+          const type = String(row?.section_type || "").toLowerCase();
+          if (type === "movie") {
+            movies += Number(row?.count ?? 0) | 0;
+          } else if (type === "show") {
+            series += Number(row?.count ?? 0) | 0;
+            const ep = (row?.grandchild_count ?? row?.child_count ?? 0);
+            episodes += Number(ep) | 0;
+          }
+        }
+        if (!cancelled) setLibTotals({ movies, series, episodes });
+      } catch (e) {
+        // If this fails, silently keep zeros — the rest of the card still works
+        console.warn("[PlexMediaServerDataCard] get_libraries_table failed:", e);
+      }
+    })();
+
     return () => { cancelled = true; };
   }, [days]);
 
@@ -102,10 +134,6 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     [summary]
   );
 
-  const movies = summary?.totals?.movies ?? 0;
-  const episodes = summary?.totals?.episodes ?? 0;
-  const totalSecs = summary?.totals?.total_time_seconds ?? 0;
-
   return (
     // No inner card chrome — content only to live inside the outer (blue) card
     <div className="space-y-4">
@@ -120,25 +148,35 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       )}
 
-      {/* DEV-only tiny debug line so we can confirm what the UI is seeing */}
-      {import.meta.env?.DEV && (
-        <div className="opacity-60 text-xs">
+      {/* NEW: Library totals strip */}
+      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+        <div className="rounded-xl px-4 py-3 bg-base-200/50">
+          <div className="text-sm opacity-70 flex items-center gap-2"><span>🎞️</span> Movies (Library)</div>
+          <div className="text-2xl font-semibold">{fmt(libTotals.movies)}</div>
         </div>
-      )}
+        <div className="rounded-xl px-4 py-3 bg-base-200/50">
+          <div className="text-sm opacity-70 flex items-center gap-2"><span>📚</span> TV Series (Library)</div>
+          <div className="text-2xl font-semibold">{fmt(libTotals.series)}</div>
+        </div>
+        <div className="rounded-xl px-4 py-3 bg-base-200/50">
+          <div className="text-sm opacity-70 flex items-center gap-2"><span>📺</span> TV Episodes (Library)</div>
+          <div className="text-2xl font-semibold">{fmt(libTotals.episodes)}</div>
+        </div>
+      </div>
 
-      {/* Summary strip */}
+      {/* Summary strip (plays over the selected window) */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>🎬</span> Movies Streamed</div>
-          <div className="text-2xl font-semibold">{movies}</div>
+          <div className="text-2xl font-semibold">{fmt(summary?.totals?.movies)}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>📺</span> TV Episodes Streamed</div>
-          <div className="text-2xl font-semibold">{episodes}</div>
+          <div className="text-2xl font-semibold">{fmt(summary?.totals?.episodes)}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>⏱️</span> Total Hours Streamed</div>
-          <div className="text-2xl font-semibold">{hhmm(totalSecs)}</div>
+          <div className="text-2xl font-semibold">{hhmm(summary?.totals?.total_time_seconds)}</div>
         </div>
       </div>
 
@@ -229,7 +267,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
       </div>
 
       <div className="opacity-60 text-xs">
-        Totals are read directly from Tautulli across the selected window.
+        Totals are read directly from Tautulli across the selected window. Library counts are from Tautulli’s library table.
       </div>
     </div>
   );
