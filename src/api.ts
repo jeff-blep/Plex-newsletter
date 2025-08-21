@@ -1,80 +1,152 @@
 // src/api.ts
-// Legacy‑compatible API shim + new helpers.
-// Uses Vite proxy: all requests go to /api/* and are forwarded to http://localhost:3001.
 
-type Json = Record<string, unknown>;
+type SMTPEnc = "TLS/SSL" | "STARTTLS" | "None";
 
-const API_BASE =
-  (import.meta as any).env?.VITE_API_BASE?.replace(/\/$/, "") || "/api";
+// Point straight at the API in dev; use relative in prod builds.
+const API_BASE = import.meta.env.DEV ? "http://localhost:3001" : "";
 
-async function GET<T = any>(path: string): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, { credentials: "same-origin" });
-  if (!r.ok) throw new Error(`${r.status} ${r.statusText} fetching ${path}`);
-  return (await r.json()) as T;
+function api(path: string) {
+  return `${API_BASE}${path}`;
 }
 
-async function POST<T = any>(path: string, body: any = {}): Promise<T> {
-  const r = await fetch(`${API_BASE}${path}`, {
+async function j<T = any>(path: string, init?: RequestInit): Promise<T> {
+  const r = await fetch(api(path), init);
+  const ct = r.headers.get("content-type") || "";
+  if (ct.includes("application/json")) return (await r.json()) as T;
+  const text = await r.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return { ok: false, error: text || `${r.status} ${r.statusText}` } as unknown as T;
+  }
+}
+
+/** Map server fields -> UI encryption string */
+function toEnc(smtpSecure?: boolean, port?: number): SMTPEnc {
+  if (smtpSecure) return "TLS/SSL";
+  if (port === 587) return "STARTTLS";
+  if (port === 25) return "None";
+  return "STARTTLS";
+}
+
+/** Map UI encryption -> server boolean */
+function toSecure(enc?: SMTPEnc): boolean {
+  return enc === "TLS/SSL";
+}
+
+/** -------- GET config (map server -> UI fields) -------- */
+export async function getConfig() {
+  const data = await j<any>("/api/config");
+  // Server keys: smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress, plexUrl, plexToken, tautulliUrl, tautulliApiKey
+  return {
+    plexUrl: data.plexUrl || "",
+    plexToken: data.plexToken || "",
+    tautulliUrl: data.tautulliUrl || "",
+    tautulliApiKey: data.tautulliApiKey || "",
+
+    fromAddress: data.fromAddress || "",
+    smtpEmailLogin: data.smtpUser || "",
+    // never return password to UI
+    smtpServer: data.smtpHost || "",
+    smtpPort: typeof data.smtpPort === "number" ? data.smtpPort : 587,
+    smtpEncryption: toEnc(!!data.smtpSecure, data.smtpPort),
+  };
+}
+
+/** -------- POST config (map UI -> server fields) -------- */
+export async function postConfig(body: {
+  plexUrl?: string;
+  plexToken?: string;
+  tautulliUrl?: string;
+  tautulliApiKey?: string;
+
+  fromAddress?: string;
+  smtpEmailLogin?: string;
+  smtpEmailPassword?: string; // optional: empty string won't change server-stored pass
+  smtpServer?: string;
+  smtpPort?: number;
+  smtpEncryption?: SMTPEnc;
+}) {
+  const serverBody: any = {
+    // Plex / Tautulli
+    plexUrl: body.plexUrl,
+    plexToken: body.plexToken,
+    tautulliUrl: body.tautulliUrl,
+    tautulliApiKey: body.tautulliApiKey,
+
+    // SMTP mapped to server schema
+    fromAddress: body.fromAddress,
+    smtpUser: body.smtpEmailLogin,
+    smtpHost: body.smtpServer,
+    smtpPort: body.smtpPort,
+    smtpSecure: toSecure(body.smtpEncryption),
+  };
+
+  // Only send smtpPass if non-empty so we don’t clear stored value
+  if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0) {
+    serverBody.smtpPass = body.smtpEmailPassword;
+  }
+
+  return j("/api/config", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    credentials: "same-origin",
-    body: JSON.stringify(body ?? {}),
+    body: JSON.stringify(serverBody),
   });
-  if (!r.ok) {
-    let msg = `${r.status} ${r.statusText}`;
-    try {
-      const j = await r.json();
-      if (j?.error) msg = String(j.error);
-      if (j?.message) msg = String(j.message);
-    } catch {}
-    throw new Error(msg);
+}
+
+/** -------- Status for the card -------- */
+export async function getStatus() {
+  return j("/api/status");
+}
+
+/** -------- Tests (use slashed routes) -------- */
+export async function testPlex(body?: { plexUrl?: string; plexToken?: string }) {
+  return j("/api/test/plex", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      plexUrl: body?.plexUrl,
+      plexToken: body?.plexToken,
+    }),
+  });
+}
+
+export async function testTautulli(body?: { tautulliUrl?: string; tautulliApiKey?: string }) {
+  return j("/api/test/tautulli", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      tautulliUrl: body?.tautulliUrl,
+      tautulliApiKey: body?.tautulliApiKey,
+    }),
+  });
+}
+
+export async function testSmtp(body?: {
+  smtpEmailLogin?: string;
+  smtpEmailPassword?: string;
+  smtpServer?: string;
+  smtpPort?: number;
+  smtpEncryption?: SMTPEnc;
+  fromAddress?: string;
+  to?: string; // optional recipient for test email
+}) {
+  const serverBody: any = {
+    smtpUser: body?.smtpEmailLogin,
+    smtpHost: body?.smtpServer,
+    smtpPort: body?.smtpPort,
+    smtpSecure: toSecure(body?.smtpEncryption),
+    fromAddress: body?.fromAddress,
+    to: body?.to,
+  };
+  if (typeof body?.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0) {
+    serverBody.smtpPass = body.smtpEmailPassword;
   }
-  return (await r.json()) as T;
+
+  // Server exposes POST /api/test-email
+  return j("/api/test-email", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(serverBody),
+  });
 }
-
-/** ========= Legacy-named exports expected by existing UI ========= **/
-
-// Load server-side settings
-export async function getConfig() {
-  return GET("/config");
-}
-
-// Post partial settings to backend (persists to .env.local server-side)
-export async function postConfig(partial: Json) {
-  return POST("/config", partial);
-}
-
-// “Run now” action — keep legacy signature; forward to /send
-export async function runNow(payload: Json = {}) {
-  return POST("/send", payload);
-}
-
-/** ========= New helpers for explicit save routes ========= **/
-
-export async function savePlex(payload: { plexUrl?: string; plexToken?: string }) {
-  return POST("/save-plex", payload);
-}
-
-export async function saveTautulli(payload: { tautulliUrl?: string; tautulliApiKey?: string }) {
-  return POST("/save-tautulli", payload);
-}
-
-/** ========= Test endpoints (production-backed) ========= **/
-
-export const testEmail = () => POST("/test-email", {});
-export const testPlex = () => GET("/test-plex");
-export const testTautulli = () => GET("/test-tautulli");
-
-/** default export for convenience */
-const api = {
-  getConfig,
-  postConfig,
-  runNow,
-  savePlex,
-  saveTautulli,
-  testEmail,
-  testPlex,
-  testTautulli,
-};
-
-export default api;

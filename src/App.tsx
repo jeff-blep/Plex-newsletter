@@ -33,7 +33,7 @@ export default function App() {
       </header>
 
       <main className="max-w-6xl mx-auto p-5 space-y-6">
-        {/* Top row: Schedule, Outgoing Email, History */}
+        {/* Top row: Schedule, Connection Settings, History */}
         <section className="grid gap-4 md:grid-cols-3">
           {/* Schedule — ENTIRE CARD CLICKABLE */}
           <div
@@ -55,7 +55,7 @@ export default function App() {
             </div>
           </div>
 
-          {/* Outgoing Email — opens Connection Settings modal */}
+          {/* Connection Settings — opens Connection Settings modal */}
           <div
             className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition cursor-pointer"
             role="button"
@@ -64,7 +64,7 @@ export default function App() {
             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setShowConn(true)}
           >
             <div className="card-body p-3">
-              <h2 className="card-title text-base md:text-xl">Outgoing Email</h2>
+              <h2 className="card-title text-base md:text-xl">Connection Settings</h2>
               <p className="text-xs md:text-sm opacity-70">
                 Sender address used for the newsletter
               </p>

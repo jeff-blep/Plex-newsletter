@@ -1,336 +1,270 @@
-// server/index.mjs
-import 'dotenv/config';
-import express from 'express';
-import cors from 'cors';
-import nodemailer from 'nodemailer';
-import fs from 'fs/promises';
-import path from 'path';
-import { fileURLToPath } from 'url';
+/* server/index.mjs */
+import express from "express";
+import cors from "cors";
+import fs from "fs";
+import path from "path";
+import nodemailer from "nodemailer";
+import { fileURLToPath } from "url";
 
-// --------------------------------------------------
-// Paths
-// --------------------------------------------------
+// Node 18+ ships global fetch
+
+// ---- ESM dirname helpers ----
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const PROJECT_ROOT = path.resolve(__dirname, '..');
-const ENV_LOCAL_PATH = path.join(PROJECT_ROOT, '.env.local');
 
-// --------------------------------------------------
-// Small utils
-// --------------------------------------------------
-const coerceString = (v, fb = '') => (typeof v === 'string' ? v : v == null ? fb : String(v));
-const coerceBool = (v, fb = false) => (typeof v === 'boolean' ? v : String(v) === 'true');
-const coerceNumber = (v, fb = 0) => {
-  const n = Number(v);
-  return Number.isFinite(n) && n >= 0 ? n : fb;
-};
-const safeEmail = (v, fb = 'noreply@example.com') => {
-  const s = coerceString(v, '').trim();
-  return /.+@.+\..+/.test(s) ? s : fb;
-};
-const safeUrl = (v, fb = '') => {
-  const s = coerceString(v, '').trim();
-  if (!s) return fb;
-  try { new URL(s); return s; } catch { return fb; }
-};
+// ---- Config file ----
+const CONFIG_PATH = path.join(__dirname, "config.json");
 
-function buildTransporter(cfg) {
-  return nodemailer.createTransport({
-    host: cfg.smtpHost,
-    port: Number(cfg.smtpPort) || 587,
-    secure: !!cfg.smtpSecure,
-    auth: cfg.smtpUser || cfg.smtpPass ? { user: cfg.smtpUser, pass: cfg.smtpPass } : undefined,
-  });
-}
-
-// --------------------------------------------------
-// .env.local persistence helpers
-// --------------------------------------------------
-async function readEnvFile(filePath) {
-  try {
-    const txt = await fs.readFile(filePath, 'utf8');
-    return txt.split(/\r?\n/);
-  } catch {
-    return []; // treat as empty
-  }
-}
-
-/**
- * Upserts provided key/values into .env.local.
- * - Preserves other lines (including comments and blank lines)
- * - Updates existing keys if found; appends new ones at the end
- */
-async function upsertEnv(updates) {
-  const lines = await readEnvFile(ENV_LOCAL_PATH);
-
-  const isKeyLine = (line) => /^[A-Z0-9_]+\s*=/.test(line);
-  const parseKey = (line) => (line.split('=')[0] || '').trim();
-
-  // Track which keys we've updated
-  const updated = new Set();
-
-  const out = lines.map((line) => {
-    if (!isKeyLine(line)) return line;
-    const key = parseKey(line);
-    if (Object.prototype.hasOwnProperty.call(updates, key)) {
-      updated.add(key);
-      const val = String(updates[key] ?? '').replace(/\r?\n/g, '\\n');
-      return `${key}=${val}`;
-    }
-    return line;
-  });
-
-  // Append any keys that weren't present
-  for (const [key, rawVal] of Object.entries(updates)) {
-    if (updated.has(key)) continue;
-    const val = String(rawVal ?? '').replace(/\r?\n/g, '\\n');
-    out.push(`${key}=${val}`);
-  }
-
-  // Write atomically
-  const tmp = `${ENV_LOCAL_PATH}.tmp`;
-  const finalText = out.join('\n') + '\n';
-  await fs.writeFile(tmp, finalText, 'utf8');
-  await fs.rename(tmp, ENV_LOCAL_PATH);
-}
-
-// --------------------------------------------------
-// In-memory config (seeded from env)
-// --------------------------------------------------
-let appConfig = {
+// ---- Default config (matches your live schema) ----
+const DEFAULT_CONFIG = {
   // SMTP
-  smtpHost: coerceString(process.env.SMTP_HOST, 'smtp.gmail.com'),
-  smtpPort: coerceNumber(process.env.SMTP_PORT, 587),
-  smtpSecure: coerceBool(process.env.SMTP_SECURE, false),
-  smtpUser: coerceString(process.env.SMTP_USER, ''),
-  smtpPass: coerceString(process.env.SMTP_PASS, ''),
-  fromAddress: safeEmail(process.env.FROM_EMAIL, 'noreply@example.com'),
+  smtpHost: "",
+  smtpPort: 587,
+  smtpSecure: false, // true => SMTPS(465); false => STARTTLS/None
+  smtpUser: "",
+  smtpPass: "",      // never returned to client
+  fromAddress: "",
 
-  // Plex
-  plexUrl: safeUrl(process.env.PLEX_URL, ''),
-  plexToken: coerceString(process.env.PLEX_TOKEN, ''),
+  // Plex / Tautulli
+  plexUrl: "",
+  plexToken: "",
+  tautulliUrl: "",
+  tautulliApiKey: "",
 
-  // Tautulli
-  tautulliUrl: safeUrl(process.env.TAUTULLI_URL, ''),
-  tautulliApiKey: coerceString(process.env.TAUTULLI_API_KEY, ''),
+  // Status for settings card
+  lastTest: { plex: "unknown", tautulli: "unknown", smtp: "unknown" },
 };
 
-// --------------------------------------------------
-// App
-// --------------------------------------------------
+function loadConfig() {
+  try {
+    const raw = fs.readFileSync(CONFIG_PATH, "utf8");
+    const parsed = JSON.parse(raw);
+    return {
+      ...DEFAULT_CONFIG,
+      ...parsed,
+      lastTest: { ...DEFAULT_CONFIG.lastTest, ...(parsed.lastTest || {}) },
+    };
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
+}
+
+function saveConfig(cfg) {
+  fs.writeFileSync(CONFIG_PATH, JSON.stringify(cfg, null, 2), "utf8");
+}
+
+let CONFIG = loadConfig();
+
+// ---- Helpers ----
+/** Accept both your schema and UI-style schema, store in your schema */
+function applyIncomingSmtp(body, cfg) {
+  // Your native keys
+  if (typeof body.smtpHost === "string") cfg.smtpHost = body.smtpHost;
+  if (typeof body.smtpPort === "number") cfg.smtpPort = body.smtpPort;
+  if (typeof body.smtpSecure === "boolean") cfg.smtpSecure = body.smtpSecure;
+  if (typeof body.smtpUser === "string") cfg.smtpUser = body.smtpUser;
+  if (typeof body.smtpPass === "string" && body.smtpPass.length > 0) cfg.smtpPass = body.smtpPass;
+  if (typeof body.fromAddress === "string") cfg.fromAddress = body.fromAddress;
+
+  // UI-style mapping
+  if (typeof body.smtpServer === "string") cfg.smtpHost = body.smtpServer;
+  if (typeof body.smtpPort === "number") cfg.smtpPort = body.smtpPort;
+  if (typeof body.smtpEmailLogin === "string") cfg.smtpUser = body.smtpEmailLogin;
+  if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0)
+    cfg.smtpPass = body.smtpEmailPassword;
+  if (typeof body.smtpEncryption === "string")
+    cfg.smtpSecure = body.smtpEncryption.toUpperCase() === "TLS/SSL"; // TLS/SSL => secure=true
+}
+
+function smtpTransportOptions(cfg) {
+  const secure = !!cfg.smtpSecure;
+  return {
+    host: cfg.smtpHost,
+    port: Number(cfg.smtpPort) || (secure ? 465 : 587),
+    secure,
+    requireTLS: !secure && Number(cfg.smtpPort) === 587, // STARTTLS hint
+    ignoreTLS: !secure && Number(cfg.smtpPort) === 25,   // plain 25
+    auth: cfg.smtpUser ? { user: cfg.smtpUser, pass: cfg.smtpPass } : undefined,
+  };
+}
+
+// ---- App ----
 const app = express();
-app.use(cors({ origin: '*' }));
+app.use(cors({ origin: "*" }));
 app.use(express.json());
 
-// Health
-app.get('/', (_req, res) => res.json({ ok: true }));
+// ---- Routes ----
 
-// ---------------- Config API ----------------
-app.get('/api/config', (_req, res) => {
-  const payload = {
-    smtpHost: coerceString(appConfig.smtpHost, ''),
-    smtpPort: coerceNumber(appConfig.smtpPort, 587),
-    smtpSecure: !!appConfig.smtpSecure,
-    smtpUser: coerceString(appConfig.smtpUser, ''),
-    fromAddress: safeEmail(appConfig.fromAddress, 'noreply@example.com'),
-
-    plexUrl: safeUrl(appConfig.plexUrl, ''),
-    plexToken: coerceString(appConfig.plexToken, ''),
-
-    tautulliUrl: safeUrl(appConfig.tautulliUrl, ''),
-    tautulliApiKey: coerceString(appConfig.tautulliApiKey, ''),
-
-    smtpPass: '', // never disclose
-  };
-  res.json(payload);
+// GET config (omit password)
+app.get("/api/config", (_req, res) => {
+  const { smtpPass, ...rest } = CONFIG;
+  res.json(rest);
 });
 
-app.post('/api/config', async (req, res) => {
-  const {
-    smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress,
-    plexUrl, plexToken,
-    tautulliUrl, tautulliApiKey,
-  } = req.body ?? {};
+// POST config (merge + persist)
+app.post("/api/config", (req, res) => {
+  const b = req.body || {};
 
-  // Update in-memory
-  if (typeof smtpHost !== 'undefined') appConfig.smtpHost = coerceString(smtpHost);
-  if (typeof smtpPort !== 'undefined') appConfig.smtpPort = coerceNumber(smtpPort, 587);
-  if (typeof smtpSecure !== 'undefined') appConfig.smtpSecure = coerceBool(smtpSecure);
-  if (typeof smtpUser !== 'undefined') appConfig.smtpUser = coerceString(smtpUser);
-  if (typeof smtpPass !== 'undefined' && smtpPass !== '') appConfig.smtpPass = coerceString(smtpPass);
-  if (typeof fromAddress !== 'undefined') appConfig.fromAddress = safeEmail(fromAddress, 'noreply@example.com');
+  // Plex
+  if (typeof b.plexUrl === "string") CONFIG.plexUrl = b.plexUrl;
+  if (typeof b.plexToken === "string") CONFIG.plexToken = b.plexToken;
 
-  if (typeof plexUrl !== 'undefined') appConfig.plexUrl = safeUrl(plexUrl, '');
-  if (typeof plexToken !== 'undefined') appConfig.plexToken = coerceString(plexToken);
+  // Tautulli
+  if (typeof b.tautulliUrl === "string") CONFIG.tautulliUrl = b.tautulliUrl;
+  if (typeof b.tautulliApiKey === "string") CONFIG.tautulliApiKey = b.tautulliApiKey;
 
-  if (typeof tautulliUrl !== 'undefined') appConfig.tautulliUrl = safeUrl(tautulliUrl, '');
-  if (typeof tautulliApiKey !== 'undefined') appConfig.tautulliApiKey = coerceString(tautulliApiKey);
+  // SMTP
+  applyIncomingSmtp(b, CONFIG);
 
-  // Persist to .env.local (only the keys we manage)
-  const persist = {};
-  if (typeof smtpHost !== 'undefined') persist.SMTP_HOST = appConfig.smtpHost;
-  if (typeof smtpPort !== 'undefined') persist.SMTP_PORT = String(appConfig.smtpPort);
-  if (typeof smtpSecure !== 'undefined') persist.SMTP_SECURE = String(!!appConfig.smtpSecure);
-  if (typeof smtpUser !== 'undefined') persist.SMTP_USER = appConfig.smtpUser;
-  if (typeof smtpPass !== 'undefined' && smtpPass !== '') persist.SMTP_PASS = appConfig.smtpPass;
-  if (typeof fromAddress !== 'undefined') persist.FROM_EMAIL = appConfig.fromAddress;
-
-  if (typeof plexUrl !== 'undefined') persist.PLEX_URL = appConfig.plexUrl;
-  if (typeof plexToken !== 'undefined') persist.PLEX_TOKEN = appConfig.plexToken;
-
-  if (typeof tautulliUrl !== 'undefined') persist.TAUTULLI_URL = appConfig.tautulliUrl;
-  if (typeof tautulliApiKey !== 'undefined') persist.TAUTULLI_API_KEY = appConfig.tautulliApiKey;
-
-  try {
-    if (Object.keys(persist).length) await upsertEnv(persist);
-    res.json({ ok: true, message: 'Config updated & persisted' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'Failed to persist .env.local' });
-  }
+  saveConfig(CONFIG);
+  res.json({ ok: true });
 });
 
-// ---------------- Convenience save routes (aliases) ----------------
-app.post('/api/save-plex', async (req, res) => {
-  const { plexUrl, plexToken } = req.body ?? {};
-  if (typeof plexUrl !== 'undefined') appConfig.plexUrl = safeUrl(plexUrl, '');
-  if (typeof plexToken !== 'undefined') appConfig.plexToken = coerceString(plexToken);
-
-  try {
-    await upsertEnv({
-      ...(typeof plexUrl !== 'undefined' ? { PLEX_URL: appConfig.plexUrl } : {}),
-      ...(typeof plexToken !== 'undefined' ? { PLEX_TOKEN: appConfig.plexToken } : {}),
-    });
-    res.json({ ok: true, message: 'Plex settings saved' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'Failed to persist Plex settings' });
-  }
-});
-
-app.post('/api/save-tautulli', async (req, res) => {
-  const { tautulliUrl, tautulliApiKey } = req.body ?? {};
-  if (typeof tautulliUrl !== 'undefined') appConfig.tautulliUrl = safeUrl(tautulliUrl, '');
-  if (typeof tautulliApiKey !== 'undefined') appConfig.tautulliApiKey = coerceString(tautulliApiKey);
-
-  try {
-    await upsertEnv({
-      ...(typeof tautulliUrl !== 'undefined' ? { TAUTULLI_URL: appConfig.tautulliUrl } : {}),
-      ...(typeof tautulliApiKey !== 'undefined' ? { TAUTULLI_API_KEY: appConfig.tautulliApiKey } : {}),
-    });
-    res.json({ ok: true, message: 'Tautulli settings saved' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'Failed to persist Tautulli settings' });
-  }
-});
-
-// ---------------- Email test + send ----------------
-app.post('/api/test-email', async (_req, res) => {
-  try {
-    const transporter = buildTransporter(appConfig);
-    const to = appConfig.fromAddress || appConfig.smtpUser;
-    if (!to) return res.status(400).json({ ok: false, error: 'No fromAddress/smtpUser to send test to' });
-
-    await transporter.sendMail({
-      from: appConfig.fromAddress || appConfig.smtpUser || 'noreply@example.com',
-      to,
-      subject: 'Plex Newsletter SMTP Test',
-      text: 'This is a test email from Kunkflix Newsletter.',
-    });
-
-    res.json({ ok: true, message: 'SMTP test email sent' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'SMTP test failed' });
-  }
-});
-
-app.post('/api/send', async (req, res) => {
-  const { to, subject, text, html } = req.body ?? {};
-  if (!to || !subject) return res.status(400).json({ ok: false, error: 'Missing "to" or "subject"' });
-
-  try {
-    const transporter = buildTransporter(appConfig);
-    await transporter.sendMail({
-      from: appConfig.fromAddress || appConfig.smtpUser || 'noreply@example.com',
-      to,
-      subject,
-      text: coerceString(text, ''),
-      html: coerceString(html, ''),
-    });
-    res.json({ ok: true, message: 'Email sent' });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'Send failed' });
-  }
-});
-
-// ---------------- Plex / Tautulli tests (PROD) ----------------
-app.get('/api/test-plex', async (_req, res) => {
-  try {
-    const url = appConfig.plexUrl;
-    const token = appConfig.plexToken;
-    if (!url || !token) return res.status(400).json({ ok: false, error: 'Missing plexUrl or plexToken' });
-
-    const resp = await fetch(`${url}/?X-Plex-Token=${encodeURIComponent(token)}`, {
-      method: 'GET',
-      headers: { 'Accept': '*/*' },
-    });
-
-    const text = await resp.text();
-    if (!resp.ok) {
-      return res.status(resp.status).json({ ok: false, error: `Plex HTTP ${resp.status}`, raw: text.slice(0, 200) });
-    }
-    res.json({ ok: true, raw: text.slice(0, 200) });
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'plex test failed' });
-  }
-});
-
-app.get('/api/test-tautulli', async (_req, res) => {
-  try {
-    const base = appConfig.tautulliUrl;
-    const key = appConfig.tautulliApiKey;
-    if (!base || !key) return res.status(400).json({ ok: false, error: 'Missing tautulliUrl or tautulliApiKey' });
-
-    const u = new URL('/api/v2', base);
-    u.searchParams.set('apikey', key);
-    u.searchParams.set('cmd', 'get_activity');
-
-    const resp = await fetch(u, { method: 'GET', headers: { 'Accept': 'application/json' } });
-    const data = await resp.json().catch(() => ({}));
-    if (!resp.ok) {
-      return res.status(resp.status).json({ ok: false, error: `Tautulli HTTP ${resp.status}`, raw: data });
-    }
-
-    const result = data?.response?.result;
-    const streamCount = data?.response?.data?.stream_count ?? data?.response?.data?.streams?.length;
-    if (result === 'success') {
-      res.json({ ok: true, streamCount, raw: data?.response?.result || 'success' });
-    } else {
-      res.status(500).json({ ok: false, error: 'tautulli returned non-success', raw: data });
-    }
-  } catch (e) {
-    res.status(500).json({ ok: false, error: e?.message || 'tautulli test failed' });
-  }
-});
-
-// ---------------- Debug ----------------
-app.get('/api/_debug', (_req, res) => {
-  const routes =
-    app._router?.stack
-      ?.filter(l => l.route && l.route.path)
-      ?.map(l => ({
-        method: Object.keys(l.route.methods)[0]?.toUpperCase() || 'GET',
-        path: l.route.path
-      })) || [];
-
+// Status for settings card
+app.get("/api/status", (_req, res) => {
+  const s = CONFIG.lastTest || {};
   res.json({
-    routes,
-    appConfig: { ...appConfig, smtpPass: '***' },
-    envFile: path.relative(PROJECT_ROOT, ENV_LOCAL_PATH),
+    emailOk: s.smtp === "ok",
+    plexOk: s.plex === "ok",
+    tautulliOk: s.tautulli === "ok",
   });
 });
 
-// ---------------- Start server ----------------
-const port = Number(process.env.PORT || 3001);
-app.listen(port, () => {
-  console.log(`Server listening on port ${port}`);
-  console.log(`Using env file: ${path.relative(PROJECT_ROOT, ENV_LOCAL_PATH)}`);
+// ---- TEST: Plex (with timeout & clear errors) ----
+app.post("/api/test/plex", async (req, res) => {
+  const plexUrl = (req.body && req.body.plexUrl) || CONFIG.plexUrl;
+  const plexToken = (req.body && req.body.plexToken) || CONFIG.plexToken;
+
+  try {
+    if (!plexUrl || !plexToken) throw new Error("Missing plexUrl or plexToken");
+
+    const urlWithScheme = /^https?:\/\//i.test(plexUrl) ? plexUrl : `http://${plexUrl}`;
+    const sep = urlWithScheme.includes("?") ? "&" : "?";
+    const probe = `${urlWithScheme}${sep}X-Plex-Token=${encodeURIComponent(plexToken)}`;
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    let r;
+    try {
+      r = await fetch(probe, { method: "GET", signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`HTTP ${r.status} ${r.statusText}${text ? ` — ${text.slice(0,180)}` : ""}`);
+    }
+
+    CONFIG.lastTest.plex = "ok";
+    saveConfig(CONFIG);
+    res.json({ ok: true });
+  } catch (e) {
+    const msg = e?.name === "AbortError" ? "Timeout reaching Plex (5s)" : (e?.message || String(e));
+    CONFIG.lastTest.plex = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: msg });
+  }
+});
+
+// Back‑compat alias
+app.post("/api/test-plex", (req, res) =>
+  app._router.handle({ ...req, url: "/api/test/plex", method: "POST" }, res, () => {})
+);
+
+// ---- TEST: Tautulli (with timeout & clear errors) ----
+app.post("/api/test/tautulli", async (req, res) => {
+  const tUrlRaw = (req.body && req.body.tautulliUrl) || CONFIG.tautulliUrl;
+  const apiKey   = (req.body && req.body.tautulliApiKey) || CONFIG.tautulliApiKey;
+
+  try {
+    if (!tUrlRaw || !apiKey) throw new Error("Missing tautulliUrl or tautulliApiKey");
+
+    const tUrl = /^https?:\/\//i.test(tUrlRaw) ? tUrlRaw : `http://${tUrlRaw}`;
+    const base = `${tUrl}`.replace(/\/+$/, "");
+    const probe = `${base}/api/v2?apikey=${encodeURIComponent(apiKey)}&cmd=get_activity`;
+
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    let r;
+    try {
+      r = await fetch(probe, { method: "GET", signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+
+    if (!r.ok) {
+      const text = await r.text().catch(() => "");
+      throw new Error(`HTTP ${r.status} ${r.statusText}${text ? ` — ${text.slice(0,180)}` : ""}`);
+    }
+
+    const json = await r.json().catch(() => null);
+    const ok = json && json.response && json.response.result === "success";
+    if (!ok) throw new Error("Unexpected response from Tautulli (no success flag)");
+
+    const streams =
+      json?.response?.data?.sessions && Array.isArray(json.response.data.sessions)
+        ? json.response.data.sessions.length
+        : undefined;
+
+    CONFIG.lastTest.tautulli = "ok";
+    saveConfig(CONFIG);
+    res.json({ ok: true, streamCount: streams });
+  } catch (e) {
+    const msg = e?.name === "AbortError" ? "Timeout reaching Tautulli (5s)" : (e?.message || String(e));
+    CONFIG.lastTest.tautulli = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: msg });
+  }
+});
+
+// Back‑compat alias
+app.post("/api/test-tautulli", (req, res) =>
+  app._router.handle({ ...req, url: "/api/test/tautulli", method: "POST" }, res, () => {})
+);
+
+// ---- TEST: SMTP ----
+app.post("/api/test-email", async (req, res) => {
+  const merged = { ...CONFIG };
+  applyIncomingSmtp(req.body || {}, merged);
+
+  try {
+    if (!merged.smtpHost || !merged.smtpPort) throw new Error("Missing SMTP server/port");
+    if (!merged.fromAddress) throw new Error("Missing From Address");
+
+    const transport = nodemailer.createTransport(smtpTransportOptions(merged));
+
+    await transport.verify();
+
+    if (req.body && typeof req.body.to === "string" && req.body.to.length > 0) {
+      await transport.sendMail({
+        from: merged.fromAddress,
+        to: req.body.to,
+        subject: "Kunkflix Newsletter SMTP Test",
+        text: "This is a test email confirming your SMTP settings are working.",
+      });
+    }
+
+    // Persist any SMTP updates (including new smtpPass if provided)
+    applyIncomingSmtp(req.body || {}, CONFIG);
+    CONFIG.lastTest.smtp = "ok";
+    saveConfig(CONFIG);
+
+    res.json({ ok: true });
+  } catch (e) {
+    CONFIG.lastTest.smtp = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: e?.message || String(e) });
+  }
+});
+
+// Alias: /api/test/smtp -> /api/test-email
+app.post("/api/test/smtp", (req, res) =>
+  app._router.handle({ ...req, url: "/api/test-email", method: "POST" }, res, () => {})
+);
+
+// ---- Start ----
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`API listening on http://localhost:${PORT}`);
 });
