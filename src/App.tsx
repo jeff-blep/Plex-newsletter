@@ -38,22 +38,35 @@ export default function App() {
   const [statusLoading, setStatusLoading] = React.useState(false);
   const [statusError, setStatusError] = React.useState<string | null>(null);
 
+  // helper: read either flat or nested { ok } or legacy *Ok keys
+  const readOk = React.useCallback((s: any, key: "email" | "plex" | "tautulli") => {
+    return Boolean(
+      // new flat booleans
+      s?.[key] ??
+      // nested shapes we added server-side
+      s?.checks?.[key]?.ok ??
+      s?.services?.[key]?.ok ??
+      // legacy shape some earlier code used
+      s?.[`${key}Ok`]
+    );
+  }, []);
+
   const refreshStatus = React.useCallback(async () => {
     try {
       setStatusLoading(true);
       setStatusError(null);
       const s = await getStatus();
       setConnStatus({
-        emailOk: !!s?.emailOk,
-        plexOk: !!s?.plexOk,
-        tautulliOk: !!s?.tautulliOk,
+        emailOk: readOk(s, "email"),
+        plexOk: readOk(s, "plex"),
+        tautulliOk: readOk(s, "tautulli"),
       });
     } catch (e: any) {
       setStatusError(e?.message || String(e));
     } finally {
       setStatusLoading(false);
     }
-  }, []);
+  }, [readOk]);
 
   // initial load
   React.useEffect(() => {
