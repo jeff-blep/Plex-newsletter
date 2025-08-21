@@ -123,7 +123,6 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
       {/* DEV-only tiny debug line so we can confirm what the UI is seeing */}
       {import.meta.env?.DEV && (
         <div className="opacity-60 text-xs">
-          DEBUG totals (UI): movies={movies} episodes={episodes} secs={totalSecs}
         </div>
       )}
 

@@ -7,7 +7,7 @@ import OwnerRecommendationCard from "./components/OwnerRecommendationCard";
 import ScheduleCard, { type ScheduleCardHandle } from "./components/ScheduleCard";
 import HistoryCard from "./components/HistoryCard";
 import RecipientsCard from "./components/RecipientsCard";
-import { getStatus, getConfig } from "./api";
+import { getStatus } from "./api";
 
 type ConnStatus = {
   emailOk: boolean;
@@ -79,33 +79,12 @@ export default function App() {
     refreshStatus();
   };
 
-  // --- NEW: history lookback (days) shared between HistoryCard and Plex card ---
-  const [historyDays, setHistoryDays] = React.useState<number>(7);
-
-  React.useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const cfg = await getConfig();
-        const d = typeof (cfg as any)?.lookbackDays === "number" ? (cfg as any).lookbackDays : 7;
-        if (!cancelled) setHistoryDays(d);
-      } catch {
-        // ignore, keep default 7
-      }
-    })();
-    return () => { cancelled = true; };
-  }, []);
-
-  const onHistoryDaysChange = React.useCallback((d: number) => {
-    setHistoryDays(d);
-  }, []);
-
   return (
     <div className="min-h-screen bg-base-100 text-base-content">
       {/* FIXED TOP BANNER */}
       <header className="fixed top-0 inset-x-0 z-50 bg-base-100 border-b border-base-300">
         <div className="px-5 py-3 flex items-center justify-between max-w-6xl mx-auto">
-          <h1 className="text-lg font-semibold truncate">
+          <h1 className="text-xl font-semibold truncate">
             Newzletr • Settings
           </h1>
           <button
@@ -142,7 +121,7 @@ export default function App() {
             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && scheduleRef.current?.open()}
           >
             <div className="card-body p-3">
-              <h2 className="card-title text-base md:text-xl">Sending Schedule</h2>
+              <h2 className="text-xl font-semibold">Sending Schedule</h2>
               <p className="text-xs md:text-sm opacity-70">
                 When the newsletter will be automatically sent
               </p>
@@ -162,7 +141,7 @@ export default function App() {
             onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && setShowConn(true)}
           >
             <div className="card-body p-3">
-              <h2 className="card-title text-base md:text-xl">Connection Settings</h2>
+              <h2 className="text-xl font-semibold">Connection Settings</h2>
               <p className="text-xs md:text-sm opacity-70">
                 Configure Email (SMTP), Plex, and Tautulli connections.
               </p>
@@ -184,14 +163,14 @@ export default function App() {
           </div>
 
           {/* History */}
-          <div className="card bg-base-200 shadow-sm card-compact">
+          <div className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition">
             <div className="card-body p-3">
-              <h2 className="card-title text-base md:text-xl">History</h2>
+              <h2 className="text-xl font-semibold">History</h2>
               <p className="text-xs md:text-sm opacity-70">
                 How many days to pull data for the newsletter
               </p>
               <div className="mt-3 text-sm">
-                <HistoryCard onDaysChange={onHistoryDaysChange} />
+                <HistoryCard />
               </div>
             </div>
           </div>
@@ -200,11 +179,9 @@ export default function App() {
         {/* Plex Media Server Data */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="card-title text-base">
-              Plex Media Server Data (Last {historyDays} day{historyDays === 1 ? "" : "s"})
-            </h2>
+            <h2 className="text-xl font-semibold">Plex Media Server Data (Last 7 days)</h2>
             <div className="mt-2">
-              <PlexMediaServerDataCard days={historyDays} />
+              <PlexMediaServerDataCard />
             </div>
           </div>
         </section>
@@ -212,7 +189,7 @@ export default function App() {
         {/* Owner Recommendation */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="card-title text-base">Owner Recommendation</h2>
+            <h2 className="text-xl font-semibold">Owner Recommendation</h2>
             <div className="mt-3">
               <OwnerRecommendationCard />
             </div>
@@ -222,7 +199,7 @@ export default function App() {
         {/* Recipients */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="card-title text-base">Recipients</h2>
+            <h2 className="text-xl font-semibold">Recipients</h2>
             <div className="mt-3">
               <RecipientsCard />
             </div>

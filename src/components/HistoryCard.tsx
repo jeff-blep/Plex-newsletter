@@ -50,8 +50,7 @@ export default function HistoryCard({ onDaysChange }: Props) {
     <>
       <div className="flex items-center justify-between">
         <div>
-          <div className="font-medium">History window</div>
-          <div className="text-xs opacity-70">How many days of activity to include</div>
+          
         </div>
         {loading ? <span className="loading loading-spinner loading-sm" /> : null}
       </div>
