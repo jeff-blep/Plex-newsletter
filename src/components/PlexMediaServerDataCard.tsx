@@ -36,29 +36,153 @@ function fmt(n?: number) {
   return n.toLocaleString();
 }
 
-const PLATFORM_ICON: Record<string, string> = {
-  "roku": "📺",
-  "apple tv": "🍎",
-  "appletv": "🍎",
-  "android tv": "🤖",
-  "android": "🤖",
-  "ios": "📱",
-  "iphone": "📱",
-  "ipad": "📱",
-  "web": "🖥️",
-  "chrome": "🖥️",
-  "chromecast": "📡",
-  "lg": "🖥️",
-  "samsung": "🖥️",
-  "xbox": "🎮",
-  "playstation": "🎮",
+function splitTwo<T>(arr: T[]) {
+  const mid = Math.ceil(arr.length / 2);
+  return { left: arr.slice(0, mid), right: arr.slice(mid) };
+}
+
+/* ================= Platform Icon Mapping (your filenames) =================
+   Expected files under /public/platforms:
+   atv.png, roku.png, android.png, ios.png, samsung.png, chrome.png, safari.png,
+   lg.png, playstation.png, chromecast.png, macos.png, xbox.png, generic.png
+*/
+const PLATFORM_FILE_MAP: Record<string, string> = {
+  appletv: "atv.png",          // Apple TV / tvOS
+  roku: "roku.png",
+  androidtv: "android.png",    // if you have a separate androidtv.png, change this
+  android: "android.png",
+  ios: "ios.png",
+  samsung: "samsung.png",      // Samsung TV / Tizen
+  chrome: "chrome.png",
+  safari: "safari.png",
+  lg: "lg.png",                // LG webOS
+  playstation: "playstation.png",
+  chromecast: "chromecast.png",
+  macos: "macos.png",
+  xbox: "xbox.png",
 };
-function iconForPlatform(name: string): string {
-  const key = String(name || "").toLowerCase();
-  for (const k of Object.keys(PLATFORM_ICON)) {
-    if (key.includes(k)) return PLATFORM_ICON[k];
+
+/** Friendly labels for normalized platform keys */
+const PLATFORM_LABEL_MAP: Record<string, string> = {
+  appletv: "Apple TV",
+  samsung: "Samsung TV",
+  lg: "LG TV",
+  androidtv: "Android TV",
+  android: "Android",
+  ios: "iOS",
+  chrome: "Chrome",
+  safari: "Safari",
+  roku: "Roku",
+  chromecast: "Chromecast",
+  playstation: "PlayStation",
+  xbox: "Xbox",
+  macos: "macOS",
+};
+
+const PLATFORM_EMOJI: Record<string, string> = {
+  appletv: "🍎",
+  roku: "📺",
+  androidtv: "🤖",
+  android: "🤖",
+  ios: "📱",
+  chrome: "🖥️",
+  safari: "🖥️",
+  lg: "🖥️",
+  samsung: "🖥️",
+  chromecast: "📡",
+  xbox: "🎮",
+  playstation: "🎮",
+  macos: "💻",
+};
+
+function emojiForKey(key: string): string {
+  return PLATFORM_EMOJI[key] || "🧩";
+}
+
+/** Normalize Tautulli labels to our keys above. */
+function normalizePlatform(name: string): string {
+  const raw = String(name || "").toLowerCase().trim();
+
+  // Apple TV
+  if (raw.includes("apple tv") || raw.includes("tvos") || raw.includes("appletv")) return "appletv";
+
+  // Samsung TV / Tizen
+  if (raw.includes("samsung tv") || raw.includes("tizen") || raw === "samsung") return "samsung";
+
+  // LG / webOS
+  if (raw.includes("webos") || raw.includes("lg")) return "lg";
+
+  // Browsers / Plex Web
+  if (raw.includes("plex web") || raw.includes("chrome")) return "chrome";
+  if (raw.includes("safari")) return "safari";
+
+  // Android TV vs Android (Plex App (Android))
+  if (raw.includes("android tv")) return "androidtv";
+  if (raw.includes("plex app (android)") || raw === "android" || raw.includes("android")) return "android";
+
+  // iOS family (Plex App (iOS), iPhone/iPad/iOS)
+  if (raw.includes("plex app (ios)") || raw.includes("iphone") || raw.includes("ipad") || raw.includes("ios")) return "ios";
+
+  // Chromecast / Roku
+  if (raw.includes("chromecast")) return "chromecast";
+  if (raw.includes("roku")) return "roku";
+
+  // Consoles
+  if (raw.includes("xbox")) return "xbox";
+  if (raw.includes("playstation") || raw.includes("ps4") || raw.includes("ps5")) return "playstation";
+
+  // macOS desktop app
+  if (raw.includes("macos") || raw.includes("plex app (macos)")) return "macos";
+
+  // Fallback: stable key (may map to generic)
+  return raw.replace(/[\s_]+/g, "").replace(/[^a-z0-9-]/g, "");
+}
+
+/** Poster-sized platform icon with PNG-first, emoji fallback */
+function PlatformIcon({
+  name,
+  className = "",
+  size = "poster",
+}: {
+  name: string;
+  className?: string;
+  size?: "poster" | "sm";
+}) {
+  const [failed, setFailed] = useState(false);
+  const key = normalizePlatform(name);
+  const file = PLATFORM_FILE_MAP[key];
+
+  const baseClasses =
+    size === "poster"
+      ? "w-14 h-14 object-cover rounded-md"
+      : "w-5 h-5 object-contain";
+
+  // Try PNG in /public/platforms
+  if (!failed && file) {
+    return (
+      <img
+        src={`/platforms/${file}`}
+        alt={name || "platform"}
+        className={`${baseClasses} ${className}`}
+        onError={() => setFailed(true)}
+        loading="lazy"
+      />
+    );
   }
-  return "🧩";
+
+  // Emoji fallback if PNG missing
+  if (size === "poster") {
+    return (
+      <div
+        className={`${baseClasses} ${className} grid place-items-center bg-base-300/60`}
+        aria-label={name}
+        title={name}
+      >
+        <span className="text-lg">{emojiForKey(key)}</span>
+      </div>
+    );
+  }
+  return <span className={className} title={name}>{emojiForKey(key)}</span>;
 }
 
 function thumbUrl(row: any): string | null {
@@ -72,7 +196,6 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
 
-  // NEW: Library totals (movies / series / episodes)
   const [libTotals, setLibTotals] = useState<{ movies: number; series: number; episodes: number }>({
     movies: 0, series: 0, episodes: 0,
   });
@@ -82,7 +205,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     setLoading(true);
     setErr(null);
 
-    // Fetch the card summary (already wired server-side)
+    // Summary for selected window
     fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
@@ -94,11 +217,10 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
       .catch(e => !cancelled && setErr(e?.message || String(e)))
       .finally(() => !cancelled && setLoading(false));
 
-    // Fetch library counts directly from Tautulli
+    // Library counts
     (async () => {
       try {
         const t = await getTautulliLibrariesTable();
-        // Shape: { data: [...] }
         const rows: any[] = Array.isArray((t as any)?.data) ? (t as any).data : [];
         let movies = 0, series = 0, episodes = 0;
         for (const row of rows) {
@@ -113,7 +235,6 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         }
         if (!cancelled) setLibTotals({ movies, series, episodes });
       } catch (e) {
-        // If this fails, silently keep zeros — the rest of the card still works
         console.warn("[PlexMediaServerDataCard] get_libraries_table failed:", e);
       }
     })();
@@ -134,10 +255,12 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     [summary]
   );
 
+  const moviesCols = useMemo(() => splitTwo(rowsMovies), [rowsMovies]);
+  const showsCols = useMemo(() => splitTwo(rowsShows), [rowsShows]);
+  const platsCols = useMemo(() => splitTwo(rowsPlatforms), [rowsPlatforms]);
+
   return (
-    // No inner card chrome — content only to live inside the outer (blue) card
     <div className="space-y-4">
-      {/* top row: spinner on the right, no duplicate title */}
       <div className="flex items-center justify-end min-h-6">
         {loading ? <span className="loading loading-spinner loading-sm" /> : null}
       </div>
@@ -148,7 +271,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       )}
 
-      {/* NEW: Library totals strip */}
+      {/* Library totals */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>🎞️</span> Movies (Library)</div>
@@ -164,7 +287,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       </div>
 
-      {/* Summary strip (plays over the selected window) */}
+      {/* Summary strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
           <div className="text-sm opacity-70 flex items-center gap-2"><span>🎬</span> Movies Streamed</div>
@@ -180,95 +303,141 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       </div>
 
-      {/* Lists */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 xl:grid-cols-3 gap-4">
-        {/* Most Watched Movies */}
-        <section>
-          <h3 className="font-medium mb-2">Most Watched Movies</h3>
+      {/* Most Watched Movies */}
+      <div className="card bg-base-100 shadow-sm">
+        <div className="card-body">
+          <h3 className="card-title text-base">Most Watched Movies</h3>
           {rowsMovies.length === 0 ? (
             <div className="opacity-70 text-sm">No data</div>
           ) : (
-            <ul className="grid grid-cols-1 gap-2">
-              {rowsMovies.map((r: any, i: number) => {
+            <TwoColList
+              left={moviesCols.left}
+              right={moviesCols.right}
+              render={(r: any, idx: number) => {
                 const title = r?.title || "Untitled";
                 const year = r?.year ? ` (${r.year})` : "";
                 const plays = Number(r?.total_plays || r?.plays || 0);
                 const u = thumbUrl(r);
                 return (
-                  <li key={i} className="flex items-center gap-3 rounded-lg p-2 hover:bg-base-200/60">
-                    {u ? (
-                      <img src={u} alt="" className="w-12 h-16 object-cover rounded-md flex-shrink-0" />
-                    ) : (
-                      <div className="w-12 h-16 bg-base-300 rounded-md" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">{title}{year}</div>
-                      <div className="opacity-70 text-xs">{plays} plays</div>
+                  <li className="card card-compact bg-base-200/60">
+                    <div className="p-2 flex items-center gap-3">
+                      <span className="w-6 text-xs opacity-70">{idx}.</span>
+                      {u ? (
+                        <img src={u} alt="" className="w-12 h-16 object-cover rounded-md flex-shrink-0" />
+                      ) : (
+                        <div className="w-12 h-16 bg-base-300 rounded-md" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium">{title}{year}</div>
+                        <div className="opacity-70 text-xs">{fmt(plays)} plays</div>
+                      </div>
                     </div>
                   </li>
                 );
-              })}
-            </ul>
+              }}
+            />
           )}
-        </section>
+        </div>
+      </div>
 
-        {/* Most Watched TV Shows */}
-        <section>
-          <h3 className="font-medium mb-2">Most Watched TV Shows</h3>
+      {/* Most Watched TV Shows */}
+      <div className="card bg-base-100 shadow-sm">
+        <div className="card-body">
+          <h3 className="card-title text-base">Most Watched TV Shows</h3>
           {rowsShows.length === 0 ? (
             <div className="opacity-70 text-sm">No data</div>
           ) : (
-            <ul className="grid grid-cols-1 gap-2">
-              {rowsShows.map((r: any, i: number) => {
+            <TwoColList
+              left={showsCols.left}
+              right={showsCols.right}
+              render={(r: any, idx: number) => {
                 const title = r?.grandparent_title || r?.title || "TV Show";
                 const plays = Number(r?.total_plays || r?.plays || 0);
                 const u = thumbUrl(r);
                 return (
-                  <li key={i} className="flex items-center gap-3 rounded-lg p-2 hover:bg-base-200/60">
-                    {u ? (
-                      <img src={u} alt="" className="w-12 h-16 object-cover rounded-md flex-shrink-0" />
-                    ) : (
-                      <div className="w-12 h-16 bg-base-300 rounded-md" />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate">{title}</div>
-                      <div className="opacity-70 text-xs">{plays} plays</div>
+                  <li className="card card-compact bg-base-200/60">
+                    <div className="p-2 flex items-center gap-3">
+                      <span className="w-6 text-xs opacity-70">{idx}.</span>
+                      {u ? (
+                        <img src={u} alt="" className="w-12 h-16 object-cover rounded-md flex-shrink-0" />
+                      ) : (
+                        <div className="w-12 h-16 bg-base-300 rounded-md" />
+                      )}
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate font-medium">{title}</div>
+                        <div className="opacity-70 text-xs">{fmt(plays)} plays</div>
+                      </div>
                     </div>
                   </li>
                 );
-              })}
-            </ul>
+              }}
+            />
           )}
-        </section>
+        </div>
+      </div>
 
-        {/* Most Used Platforms */}
-        <section>
-          <h3 className="font-medium mb-2">Most Used Platforms</h3>
+      {/* Most Used Platforms */}
+      <div className="card bg-base-100 shadow-sm">
+        <div className="card-body">
+          <h3 className="card-title text-base">Most Used Platforms</h3>
           {rowsPlatforms.length === 0 ? (
             <div className="opacity-70 text-sm">No data</div>
           ) : (
-            <ul className="grid grid-cols-1 gap-2">
-              {rowsPlatforms.map((r: any, i: number) => {
-                const name = r?.platform || r?.label || r?.client || "Platform";
+            <TwoColList
+              left={platsCols.left}
+              right={platsCols.right}
+              render={(r: any, idx: number) => {
+                const rawName = r?.platform || r?.label || r?.client || "Platform";
                 const plays = Number(r?.total_plays || r?.plays || 0);
+                const key = normalizePlatform(rawName);
+                const friendly = PLATFORM_LABEL_MAP[key] || rawName;
                 return (
-                  <li key={i} className="flex items-center justify-between rounded-lg p-2 hover:bg-base-200/60">
-                    <span className="truncate flex items-center gap-2">
-                      <span>{iconForPlatform(name)}</span>
-                      <span className="truncate">{name}</span>
-                    </span>
-                    <span className="opacity-70 text-xs ml-2">{plays} plays</span>
+                  <li className="card card-compact bg-base-200/60">
+                    <div className="p-2 flex items-center justify-between gap-3">
+                      <span className="truncate flex items-center gap-3">
+                        <span className="w-6 text-xs opacity-70">{idx}.</span>
+                        <PlatformIcon name={rawName} size="poster" />
+                        <span className="truncate">{friendly}</span>
+                      </span>
+                      <span className="opacity-70 text-xs ml-2">{fmt(plays)} plays</span>
+                    </div>
                   </li>
                 );
-              })}
-            </ul>
+              }}
+            />
           )}
-        </section>
+        </div>
       </div>
 
       <div className="opacity-60 text-xs">
         Totals are read directly from Tautulli across the selected window. Library counts are from Tautulli’s library table.
       </div>
+    </div>
+  );
+}
+
+/** Utility to render two equal columns of small cards with running index */
+function TwoColList({
+  left,
+  right,
+  render,
+}: {
+  left: any[];
+  right: any[];
+  render: (row: any, idx: number) => React.ReactNode;
+}) {
+  return (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      <ul className="space-y-2">
+        {left.map((r, i) => (
+          <React.Fragment key={`left-${i}`}>{render(r, i + 1)}</React.Fragment>
+        ))}
+      </ul>
+      <ul className="space-y-2">
+        {right.map((r, i) => (
+          <React.Fragment key={`right-${i}`}>{render(r, left.length + i + 1)}</React.Fragment>
+        ))}
+      </ul>
     </div>
   );
 }
