@@ -13,6 +13,13 @@ export default function HistoryCard({ onDaysChange }: Props) {
   const [notice, setNotice] = React.useState<string | null>(null);
   const [error, setError] = React.useState<string | null>(null);
 
+  // NEW: broadcast helper so other components can react (no prop wiring needed)
+  const broadcastDays = React.useCallback((d: number) => {
+    try {
+      window.dispatchEvent(new CustomEvent("lookbackDays:update", { detail: d }));
+    } catch {}
+  }, []);
+
   React.useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -21,7 +28,11 @@ export default function HistoryCard({ onDaysChange }: Props) {
         setError(null);
         const cfg = await getConfig();
         const d = typeof (cfg as any)?.lookbackDays === "number" ? (cfg as any).lookbackDays : 7;
-        if (!cancelled) setDays(d);
+        if (!cancelled) {
+          setDays(d);
+          onDaysChange?.(d);      // existing parent callback (if provided)
+          broadcastDays(d);       // NEW: tell the rest of the app
+        }
       } catch (e: any) {
         if (!cancelled) setError(e?.message || String(e));
       } finally {
@@ -29,7 +40,8 @@ export default function HistoryCard({ onDaysChange }: Props) {
       }
     })();
     return () => { cancelled = true; };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onDaysChange]);
 
   async function save() {
     try {
@@ -38,7 +50,8 @@ export default function HistoryCard({ onDaysChange }: Props) {
       setNotice(null);
       await postConfig({ lookbackDays: days });
       setNotice("Saved history window.");
-      onDaysChange?.(days);
+      onDaysChange?.(days);   // existing callback
+      broadcastDays(days);    // NEW: broadcast change
     } catch (e: any) {
       setError(e?.message || String(e));
     } finally {
@@ -49,9 +62,7 @@ export default function HistoryCard({ onDaysChange }: Props) {
   return (
     <>
       <div className="flex items-center justify-between">
-        <div>
-          
-        </div>
+        <div />
         {loading ? <span className="loading loading-spinner loading-sm" /> : null}
       </div>
 

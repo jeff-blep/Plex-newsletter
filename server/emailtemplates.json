@@ -1,0 +1,15 @@
+[
+  {
+    "id": "veajjqv77eni0crrdfykea",
+    "name": "asda",
+    "html": "fffasdf",
+    "updatedAt": 1755891395922
+  },
+  {
+    "id": "8cidqqz4ld9bzeb6vgg2l",
+    "name": "Test",
+    "html": "{{CARD_OWNER_RECOMMENDATION}}<div>{{CARD_RECENT_MOVIES}}</div><div>{{CARD_RECENT_EPISODES}}</div><div>{{CARD_SERVER_TOTALS}}{{CARD_POPULAR_PLATFORMS}}</div><div>{{CARD_MOST_WATCHED_MOVIES}}</div><div>{{CARD_MOST_WATCHED_SHOWS}}</div><div>{{CARD_MOST_WATCHED_EPISODES}}</div><div>{{CARD_POPULAR_MOVIES}}</div><div>{{CARD_POPULAR_SHOWS}}</div><div><br></div>",
+    "updatedAt": 1756056082448,
+    "historyDays": 7
+  }
+]

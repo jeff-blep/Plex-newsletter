@@ -192,34 +192,15 @@ function smtpTransportOptions(cfg) {
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
-
-// Serve platform icons (from /public)
-const PUBLIC_DIR = path.join(__dirname, "..", "public");
-app.use("/assets", express.static(PUBLIC_DIR));
-
-// DEBUG
-try {
-  const exists = fs.existsSync(PUBLIC_DIR);
-  console.log("[assets] mount ->", PUBLIC_DIR, exists ? "(exists)" : "(MISSING)");
-  if (exists) {
-    const platformsDir = path.join(PUBLIC_DIR, "platforms");
-    const list = fs.existsSync(platformsDir) ? fs.readdirSync(platformsDir) : [];
-    console.log("[assets] /platforms contains:", list);
-  }
-} catch (e) {
-  console.log("[assets] check failed:", e?.message || e);
-}
-
-// (then your routes like __whoami, etc.)
-app.get("/__whoami", (_req, res) => {
+app.get("/__whoami", (_req, res) =>
   res.json({
     file: __filename,
     configPath: CONFIG_PATH,
     recipientsPath: RECIPIENTS_PATH,
     templatesPath: TEMPLATES_PATH,
     newslettersPath: NEWSLETTERS_PATH,
-  });
-});
+  })
+);
 
 /* --------------------------- mount feature routers ------------------------- */
 const plexRouter = await loadRouter(new URL("./routes/plex.mjs", import.meta.url), "plex");
@@ -460,6 +441,7 @@ app.post("/api/test/tautulli", async (req, res) => {
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
     const json = await r.json().catch(() => null);
     const ok = json && json.response && json.response.result === "success";
+    if (!ok) throw new Error("Unexpected response from Tautulli");
     CONFIG.lastTest.tautulli = "ok";
     saveConfig(CONFIG);
     res.json({ ok: true });
@@ -562,138 +544,11 @@ async function fetchWithTimeout(url, ms = 6000) {
   try { return await fetch(url, { signal: ac.signal }); }
   finally { clearTimeout(t); }
 }
-/* -------- Plex totals helpers (used by CARD_SERVER_TOTALS) -------- */
 
-/** Fetch a Plex JSON endpoint relative to CONFIG.plexUrl, auto-adding X-Plex-Token. */
-async function fetchPlexJson(pathAndQuery) {
-  const base = (CONFIG.plexUrl || "").replace(/\/+$/, "");
-  const token = CONFIG.plexToken || "";
-  if (!base || !token) throw new Error("Missing Plex URL or token in config.json");
-
-  // Ensure leading slash
-  const rel = String(pathAndQuery || "");
-  const path = rel.startsWith("/") ? rel : `/${rel}`;
-
-  // Add token (preserve any existing query params)
-  const sep = path.includes("?") ? "&" : "?";
-  const url = `${base}${path}${sep}X-Plex-Token=${encodeURIComponent(token)}`;
-
-  const r = await fetchWithTimeout(url, 7000);
-  const txt = await r.text();
-  if (!r.ok) {
-    throw new Error(`Plex HTTP ${r.status} ${r.statusText}: ${txt.slice(0, 200)}`);
-  }
-
-  // Many Plex endpoints default to XML; prefer JSON when available via "Accept: application/json".
-  // Some servers still return XML; in that case we do a minimal conversion attempt.
-  try {
-    return JSON.parse(txt);
-  } catch {
-    // Attempt to extract basic attributes from XML if JSON parse fails.
-    // This is very light-touch: we just expose the raw string so callers can skip/fallback.
-    return { _rawXml: txt };
-  }
-}
-
-/**
- * Get library-wide totals from Plex:
- *   - moviesTotal: total Movies across all "movie" libraries
- *   - showsTotal: total Shows across all "show" libraries
- *   - episodesTotal: total Episodes across all "show" libraries
- *
- * Strategy:
- *   1) /library/sections  -> discover sections and their 'type' (movie/show)
- *   2) For movie sections:  /library/sections/{key}/all?type=1&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *      Use MediaContainer.totalSize if present; otherwise fallback to size attribute.
- *   3) For show sections:
- *        shows:    /library/sections/{key}/all?type=2&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *        episodes: /library/sections/{key}/all?type=4&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *      Sum totals across all show sections.
- */
-async function fetchPlexLibraryTotals() {
-  const safeNum = (v) => {
-    const n = Number(v);
-    return Number.isFinite(n) ? n : 0;
-  };
-
-  // 1) Discover sections
-  let sections;
-  try {
-    const j = await fetchPlexJson("/library/sections");
-    if (j && j.MediaContainer && Array.isArray(j.MediaContainer.Directory)) {
-      sections = j.MediaContainer.Directory.map(d => ({
-        key: d.key,
-        type: d.type, // "movie" | "show" | others
-      }));
-    } else if (j && j._rawXml) {
-      // Extremely basic XML scrape for <Directory type="movie" key="x" />
-      const dirMatches = [...j._rawXml.matchAll(/<Directory\b[^>]*>/g)];
-      sections = dirMatches.map(m => {
-        const tag = m[0];
-        const type = (tag.match(/\btype="([^"]+)"/) || [])[1];
-        const key  = (tag.match(/\bkey="([^"]+)"/) || [])[1];
-        return { key, type };
-      }).filter(s => s.key && s.type);
-    } else {
-      sections = [];
-    }
-  } catch {
-    sections = [];
-  }
-
-  const movieSections = sections.filter(s => s.type === "movie");
-  const showSections  = sections.filter(s => s.type === "show");
-
-  // Helper to read totalSize/size from a /all response (JSON or XML)
-  const readTotalFromAll = (res) => {
-    if (res && res.MediaContainer) {
-      // Prefer totalSize; fallback size
-      const mc = res.MediaContainer;
-      if (mc.totalSize != null) return safeNum(mc.totalSize);
-      if (mc.size != null) return safeNum(mc.size);
-    }
-    if (res && res._rawXml) {
-      const m1 = res._rawXml.match(/\btotalSize="(\d+)"/);
-      if (m1) return safeNum(m1[1]);
-      const m2 = res._rawXml.match(/\bsize="(\d+)"/);
-      if (m2) return safeNum(m2[1]);
-    }
-    return 0;
-    };
-
-  // 2) Movies total
-  let moviesTotal = 0;
-  for (const s of movieSections) {
-    try {
-      const res = await fetchPlexJson(`/library/sections/${encodeURIComponent(s.key)}/all?type=1&X-Plex-Container-Start=0&X-Plex-Container-Size=0`);
-      moviesTotal += readTotalFromAll(res);
-    } catch {}
-  }
-
-  // 3) Shows + Episodes totals
-  let showsTotal = 0;
-  let episodesTotal = 0;
-  for (const s of showSections) {
-    try {
-      const resShows = await fetchPlexJson(`/library/sections/${encodeURIComponent(s.key)}/all?type=2&X-Plex-Container-Start=0&X-Plex-Container-Size=0`);
-      showsTotal += readTotalFromAll(resShows);
-    } catch {}
-    try {
-      const resEps = await fetchPlexJson(`/library/sections/${encodeURIComponent(s.key)}/all?type=4&X-Plex-Container-Start=0&X-Plex-Container-Size=0`);
-      episodesTotal += readTotalFromAll(resEps);
-    } catch {}
-  }
-
-  return { moviesTotal, showsTotal, episodesTotal };
-}
 /* =============================== RENDERING ================================ */
 /** helpers to render the same tokens the client preview supports */
 function htmlEscape(s) {
-  return String(s ?? "")
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  return String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]);
 }
 function cardHtml(title, bodyHtml) {
   return `<div style="border:1px solid #e5e7eb;border-radius:12px;padding:16px;background:#fff;margin:16px 0;">
@@ -703,18 +558,6 @@ function cardHtml(title, bodyHtml) {
 }
 function li(label, value) {
   return `<li>${htmlEscape(label)} <span style="opacity:.7">— ${htmlEscape(value)}</span></li>`;
-}
-
-function formatInt(n) {
-  const m = Number(n);
-  return Number.isFinite(m) ? m.toLocaleString("en-US") : String(n);
-}
-function formatHm(hours, minutes) {
-  const h = Number.isFinite(hours) ? hours : 0;
-  const m = Number.isFinite(minutes) ? minutes : 0;
-  const hs = h === 1 ? "Hour" : "Hours";
-  const ms = m === 1 ? "Minute" : "Minutes";
-  return `${h.toLocaleString("en-US")} ${hs}, ${m.toLocaleString("en-US")} ${ms}`;
 }
 function posterFrom(row) {
   const p = row?.thumbPath || row?.thumb || row?.grandparentThumb || row?.parentThumb || row?.art || row?.poster || null;
@@ -727,75 +570,8 @@ function posterFrom(row) {
 function posterImg(src, alt = "", w = 36, h = 54) {
   return `<img src="${src}" alt="${htmlEscape(alt)}" style="width:${w}px;height:${h}px;object-fit:cover;border-radius:6px;margin-right:10px;border:1px solid #e5e7eb" />`;
 }
-function platformIconUrl(nameRaw = "") {
-  const base = "http://localhost:3001/assets/platforms";
-  const s = String(nameRaw).toLowerCase();
-  if (s.includes("tvos") || s.includes("apple tv")) return `${base}/atv.png`;
-  if (s.includes("android tv")) return `${base}/androidtv.png`;
-  if (s.includes("android")) return `${base}/android.png`;
-  if (s.includes("roku")) return `${base}/roku.png`;
-  if (s.includes("fire tv") || s.includes("firetv")) return `${base}/firetv.png`;
-  if (s.includes("samsung") || s.includes("tizen")) return `${base}/samsung.png`;
-  if (s.includes("lg")) return `${base}/lg.png`;
-  if (s.includes("xbox")) return `${base}/xbox.png`;
-  if (s.includes("playstation") || s.includes("ps4") || s.includes("ps5")) return `${base}/playstation.png`;
-  if (s.includes("windows")) return `${base}/windows.png`;
-  if (s.includes("ios")) return `${base}/ios.png`;
-  if (s.includes("mac")) return `${base}/macos.png`;
-  if (s.includes("linux")) return `${base}/linux.png`;
-  if (s.includes("chrome")) return `${base}/chrome.png`;
-  if (s.includes("safari")) return `${base}/safari.png`;
-  if (s.includes("edge")) return `${base}/edge.png`;
-  if (s.includes("web")) return `${base}/web.png`;
-  return `${base}/generic.png`;
-}
-
-function platformDisplayName(nameRaw = "") {
-  const s = String(nameRaw).toLowerCase();
-  if (s.includes("tvos") || s.includes("apple tv")) return "Apple TV";
-  if (s.includes("tizen") || s.includes("samsung")) return "Samsung TV";
-  if (s.includes("roku")) return "Roku";
-  if (s.includes("android tv")) return "Android TV";
-  if (s === "android") return "Plex App (Android)";
-  if (s.includes("ios")) return "Plex App (iOS)";
-  if (s.includes("windows")) return "Windows";
-  if (s.includes("mac")) return "macOS";
-  if (s.includes("linux")) return "Linux";
-  if (s.includes("chrome")) return "Chrome";
-  if (s.includes("safari")) return "Safari";
-  if (s.includes("edge")) return "Edge";
-  if (s.includes("firefox")) return "Firefox";
-  if (s.includes("fire tv") || s.includes("firetv")) return "Fire TV";
-  if (s.includes("lg")) return "LG TV";
-  if (s.includes("playstation") || s.includes("ps4") || s.includes("ps5")) return "PlayStation";
-  if (s.includes("xbox")) return "Xbox";
-  if (s.includes("web")) return "Web App";
-  return "Other";
-}
 function rowType(row) {
   return String(row?.media_type || row?.type || row?.section_type || "").toLowerCase();
-}
-
-/* -------- app.plex.tv link helpers (place ABOVE the render blocks) -------- */
-async function buildAppPlexHref(ratingKey) {
-  if (ratingKey == null) return null;
-  try {
-    const r = await fetch("http://localhost:3001/api/plex/server-id");
-    if (!r.ok) return null;
-    const j = await r.json();
-    const sid = j?.machineIdentifier;
-    if (!sid) return null;
-    const key = `/library/metadata/${encodeURIComponent(String(ratingKey))}`;
-    return `https://app.plex.tv/desktop/#!/server/${encodeURIComponent(sid)}/details?key=${encodeURIComponent(key)}`;
-  } catch {
-    return null;
-  }
-}
-async function absolutizePlexHref(href, ratingKey) {
-  const h = String(href || "");
-  if (h.startsWith("http://") || h.startsWith("https://")) return h;
-  const built = await buildAppPlexHref(ratingKey);
-  return built || null;
 }
 
 /** Replace any/all occurrences of a list of tokens with provided html */
@@ -837,8 +613,11 @@ async function buildOwnerRecommendationHtml() {
   const id = CONFIG?.ownerRecommendation?.plexItemId;
   const note = typeof CONFIG?.ownerRecommendation?.note === "string" ? CONFIG.ownerRecommendation.note : "";
 
+  // Default body when nothing selected, but still show note if present.
   if (!id) {
-    const body = note ? `<div>${htmlEscape(note)}</div>` : `<div style="opacity:.7">No item selected.</div>`;
+    const body = note
+      ? `<div>${htmlEscape(note)}</div>`
+      : `<div style="opacity:.7">No item selected.</div>`;
     return cardHtml("Host’s Recommendation", body);
   }
 
@@ -850,8 +629,7 @@ async function buildOwnerRecommendationHtml() {
       if (item) {
         const title = item.title || item.grandparentTitle || "Title";
         const year = item.year ? ` (${item.year})` : "";
-          const hrefLocal = item.webHref || item.deepLink || item.href || null;
-          const href = (await absolutizePlexHref(hrefLocal, id)) || "#";
+        const href = item.webHref || item.deepLink || item.href || "#";
         const pSrc = posterFrom(item);
         const img = pSrc ? posterImg(pSrc, title, 96, 144) : "";
         const info =
@@ -863,6 +641,7 @@ async function buildOwnerRecommendationHtml() {
       }
     }
   } catch {}
+  // If lookup failed, at least show the note.
   const fallback = note ? `<div>${htmlEscape(note)}</div>` : `<div style="opacity:.7">Could not load item.</div>`;
   return cardHtml("Host’s Recommendation", fallback);
 }
@@ -873,7 +652,7 @@ async function renderTemplate(html, historyDays) {
   const days = Math.max(1, Number(historyDays || CONFIG.lookbackDays || 7));
   const homeSummary = await getHomeSummary(days);
 
-  // Host Recommendation
+  // Host Recommendation (support multiple token names)
   if (OWNER_REC_TOKENS.some((t) => out.includes(t))) {
     const block = await buildOwnerRecommendationHtml();
     out = replaceAnyToken(out, OWNER_REC_TOKENS, block);
@@ -968,269 +747,75 @@ async function renderTemplate(html, historyDays) {
   if (out.includes("{{CARD_POPULAR_PLATFORMS}}")) {
     const rows = pickRows(blocks, ["top_platforms", "most_used_platforms", "top_clients"]);
     const items = rows
-      .map((r) => ({
-        name: r?.platform || r?.label || "Platform",
-        plays: Number(r?.total_plays || r?.plays || 0),
-      }))
-      .filter((x) => x.name && Number.isFinite(x.plays))
+      .map((r) => ({ name: r?.platform || r?.label || "Platform", plays: Number(r?.total_plays || r?.plays || 0) }))
       .sort((a, b) => b.plays - a.plays)
-      .slice(0, 6);
-
+      .slice(0, 5);
     const body = items.length
-      ? `<ul style="list-style:none;padding:0;margin:0">
-          ${items
-            .map((x) => {
-              const icon = platformIconUrl(x.name);
-              return `<li style="display:flex;align-items:center;gap:10px;margin:8px 0;">
-                        <img src="${icon}" alt="${htmlEscape(x.name)}" width="20" height="20" style="width:20px;height:20px;object-fit:contain;border-radius:4px;border:1px solid #e5e7eb;flex-shrink:0" />
-      <span style="flex:1;min-width:0">${htmlEscape(platformDisplayName(x.name))}</span>
-                        <span style="opacity:.7">${x.plays} plays</span>
-                      </li>`;
-            })
-            .join("")}
-        </ul>`
+      ? `<ol>${items.map((x) => li(x.name, `${x.plays} plays`)).join("")}</ol>`
       : `<div style="opacity:.7">No data</div>`;
-
-    out = out.replaceAll("{{CARD_POPULAR_PLATFORMS}}", cardHtml("Most Popular Streaming Platforms", body));
+    out = out.replaceAll("{{CARD_POPULAR_PLATFORMS}}", cardHtml("Most Popular Streaming Platform", body));
   }
-    // CARD_SERVER_TOTALS (Tautulli first; fallback to Plex library scan)
-    if (out.includes("{{CARD_SERVER_TOTALS}}")) {
-      const totalsSafe = homeSummary && typeof homeSummary === "object" ? (homeSummary.totals || {}) : {};
-      const moviesStreamed   = Number.isFinite(Number(totalsSafe.movies)) ? Number(totalsSafe.movies) : 0;
-      const episodesStreamed = Number.isFinite(Number(totalsSafe.episodes)) ? Number(totalsSafe.episodes) : 0;
-      const secRaw           = Number.isFinite(Number(totalsSafe.total_time_seconds)) ? Number(totalsSafe.total_time_seconds) : 0;
 
-      const hours   = Math.floor(secRaw / 3600);
-      const minutes = Math.floor((secRaw % 3600) / 60);
-      const timeStr = formatHm(hours, minutes);
+  // CARD_STREAMING_DATA
+  if (out.includes("{{CARD_STREAMING_DATA}}")) {
+    const hours = Math.round((Number(totals.total_time_seconds || 0) / 3600) * 10) / 10;
+    const ds = ` (Last ${days} Days)`;
+    const body = `
+      <ul style="margin:0;padding-left:18px">
+        ${li(`Movies Streamed${ds}`, String(totals.movies ?? 0))}
+        ${li(`TV Episodes Streamed${ds}`, String(totals.episodes ?? 0))}
+        ${li(`Total Hours Streamed${ds}`, `${hours}`)}
+      </ul>`;
+    out = out.replaceAll("{{CARD_STREAMING_DATA}}", cardHtml("Streaming Summary", body));
+  }
 
-      // Try to extract library totals from Tautulli blocks
-      let moviesTotal = null, showsTotal = null, episodesTotal = null;
-      const blocksLocal = Array.isArray(homeSummary?.home) ? homeSummary.home : [];
-      const coerceNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
-      const readMaybe = (obj, keys) => { for (const k of keys) { if (obj && obj[k] != null) { const n = coerceNum(obj[k]); if (n != null) return n; } } return null; };
-
-      for (const b of blocksLocal) {
-        const rows = Array.isArray(b?.rows) ? b.rows : [];
-        for (const r of rows) {
-          if (moviesTotal   == null) moviesTotal   = readMaybe(r, ["total_movies", "movies", "movie_count", "count_movies"]);
-          if (showsTotal    == null) showsTotal    = readMaybe(r, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
-          if (episodesTotal == null) episodesTotal = readMaybe(r, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
-        }
+  // CARD_SERVER_TOTALS
+  if (out.includes("{{CARD_SERVER_TOTALS}}")) {
+    let moviesTotal = null, showsTotal = null, episodesTotal = null;
+    for (const b of blocks) {
+      const rows = Array.isArray(b?.rows) ? b.rows : [];
+      for (const r of rows) {
+        if (r?.total_movies != null && moviesTotal == null) moviesTotal = Number(r.total_movies);
+        if (r?.total_tv_shows != null && showsTotal == null) showsTotal = Number(r.total_tv_shows);
+        if (r?.total_episodes != null && episodesTotal == null) episodesTotal = Number(r.total_episodes);
       }
-      if (moviesTotal == null || showsTotal == null || episodesTotal == null) {
-        for (const b of blocksLocal) {
-          if (moviesTotal   == null) moviesTotal   = readMaybe(b, ["total_movies", "movies", "movie_count", "count_movies"]);
-          if (showsTotal    == null) showsTotal    = readMaybe(b, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
-          if (episodesTotal == null) episodesTotal = readMaybe(b, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
-        }
-      }
-
-      // Fallback to Plex if any are missing or zero
-      if (!(moviesTotal > 0 && showsTotal > 0 && episodesTotal > 0)) {
-        try {
-          const plexTotals = await fetchPlexLibraryTotals();
-          if (moviesTotal   == null || moviesTotal   === 0) moviesTotal   = plexTotals.moviesTotal;
-          if (showsTotal    == null || showsTotal    === 0) showsTotal    = plexTotals.showsTotal;
-          if (episodesTotal == null || episodesTotal === 0) episodesTotal = plexTotals.episodesTotal;
-        } catch {}
-      }
-
-      // Final safety
-      moviesTotal   = moviesTotal   ?? 0;
-      showsTotal    = showsTotal    ?? 0;
-      episodesTotal = episodesTotal ?? 0;
-
-      const ds = ` (Last ${days} Days)`;
-      const body = `
-        <ul style="margin:0;padding-left:18px">
-          ${li("🎬 Movies Streamed" + ds, formatInt(moviesStreamed))}
-          ${li("📺 TV Episodes Streamed" + ds, formatInt(episodesStreamed))}
-          ${li("🕰️ Time Streamed" + ds, timeStr)}
-        </ul>
-        <hr style="border:none;border-top:1px solid #e5e7eb;margin:8px 0" />
-        <ul style="margin:0;padding-left:18px">
-          ${li("🎥 Movies (Entire Library)", formatInt(moviesTotal))}
-          ${li("📺 TV Series (Entire Library)", formatInt(showsTotal))}
-          ${li("🎞️ TV Episodes (Entire Library)", formatInt(episodesTotal))}
-        </ul>`;
-
-      out = out.replaceAll("{{CARD_SERVER_TOTALS}}", cardHtml("Plex Media Server Totals", body));
     }
-  // RECENT MOVIES (with links + descriptions)
+    const body =
+      moviesTotal != null || showsTotal != null || episodesTotal != null
+        ? `<ul style="margin:0;padding-left:18px">
+            ${moviesTotal != null ? li("Movies", String(moviesTotal)) : ""}
+            ${showsTotal != null ? li("TV Series", String(showsTotal)) : ""}
+            ${episodesTotal != null ? li("Episodes", String(episodesTotal)) : ""}
+          </ul>`
+        : `<div style="opacity:.7">Totals not available from Tautulli Home Stats.</div>`;
+    out = out.replaceAll("{{CARD_SERVER_TOTALS}}", cardHtml("Plex Media Server Totals", body));
+  }
+
+  // RECENT MOVIES
   if (out.includes("{{CARD_RECENT_MOVIES}}")) {
-    const daysLocal = Math.max(1, Number(historyDays || CONFIG.lookbackDays || 7));
-    let rows = [];
-    try {
-      const r = await fetch(
-        `http://localhost:3001/api/tautulli/recent?type=movie&days=${encodeURIComponent(daysLocal)}&limit=20`
-      );
-      if (r.ok) {
-        const j = await r.json();
-        rows = Array.isArray(j?.rows) ? j.rows : [];
-      }
-    } catch {}
-
-    const baseItems = rows.slice(0, 8).map((r) => ({
-      id: r?.rating_key || r?.ratingKey || r?.id,
-      title: r?.title || "Untitled",
-      year: r?.year,
-      poster: posterFrom(r),
-      href: r?.webHref || r?.deepLink || r?.href || null,
-      summary: r?.summary || r?.plot || r?.tagline || "",
-    }));
-
-    await Promise.all(
-      baseItems.map(async (it) => {
-        if ((!it.href || !it.summary) && it.id != null) {
-          try {
-            const rr = await fetch(`http://localhost:3001/api/plex/item/${encodeURIComponent(String(it.id))}`);
-            if (rr.ok) {
-              const jj = await rr.json().catch(() => null);
-              const item = jj?.item;
-              if (item) {
-                if (!it.href) it.href = item.webHref || item.deepLink || item.href || null;
-                if (!it.summary) it.summary = item.summary || item.plot || item.tagline || "";
-              }
-            }
-          } catch {}
-        }
-        it.href = await absolutizePlexHref(it.href, it.id);
-      })
-    );
-
-    const truncate = (s, n = 420) => {
-      const t = String(s || "");
-      return t.length > n ? t.slice(0, n - 1) + "…" : t;
-    };
-
-    const grid = baseItems.length
-      ? `<div style="display:flex;flex-direction:column;gap:14px">
-           ${baseItems
-             .map((x) => {
-               const img = x.poster ? posterImg(x.poster, x.title, 96, 144) : "";
-               const titleHtml = x.href
-                 ? `<a href="${x.href}" target="_blank" rel="noreferrer" style="text-decoration:none;color:#93c5fd;font-size:14px;font-weight:600;display:block;margin-bottom:6px">
-                      ${htmlEscape(x.title)}${x.year ? ` (${x.year})` : ""}
-                    </a>`
-                 : `<div style="font-size:14px;font-weight:600;margin-bottom:6px">${htmlEscape(x.title)}${x.year ? ` (${x.year})` : ""}</div>`;
-               const left = `<div style="width:110px;flex-shrink:0">${img}</div>`;
-               const right = `<div style="flex:1;min-width:0;font-size:13px;line-height:1.45">
-                                ${titleHtml}
-                                ${htmlEscape(truncate(x.summary || "No description available.", 420))}
-                              </div>`;
-               return `<div style="display:flex;gap:14px;align-items:flex-start">${left}${right}</div>`;
-             })
-             .join("")}
-         </div>`
-      : `<div style="opacity:.75">No recent movies in the last ${daysLocal} days.</div>`;
-
+    const rows =
+      pickRows(blocks, ["recently_added", "recently_added_movies", "recently_added_items"]) || [];
+    const items = rows
+      .filter((r) => rowType(r) === "movie")
+      .map((r) => ({ title: r?.title || "Untitled", year: r?.year, poster: posterFrom(r) }))
+      .slice(0, 8);
+    const grid = items.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:10px">${items.map((x) => (x.poster ? posterImg(x.poster, x.title, 96, 144) : "")).join("")}</div>`
+      : `<div style="opacity:.75">Preview • Will populate dynamically on send (Last ${days} Days).</div>`;
     out = out.replaceAll("{{CARD_RECENT_MOVIES}}", cardHtml("Recently added Movies", grid));
   }
 
   // RECENT EPISODES
   if (out.includes("{{CARD_RECENT_EPISODES}}")) {
-    const daysLocal = Math.max(1, Number(historyDays || CONFIG.lookbackDays || 7));
-
-    // 1) fetch recent episodes
-    let rows = [];
-    try {
-      const r = await fetch(
-        `http://localhost:3001/api/tautulli/recent?type=episode&days=${encodeURIComponent(daysLocal)}&limit=50`
-      );
-      if (r.ok) {
-        const j = await r.json();
-        rows = Array.isArray(j?.rows) ? j.rows : [];
-      }
-    } catch {}
-
-    // helpers for numbers
-    const toIntOrNull = (v) => {
-      const n = parseInt(v, 10);
-      return Number.isFinite(n) ? n : null;
-    };
-
-    // 2) group by series (grandparent), ignoring Jeopardy!
-    const bySeries = new Map();
-    for (const r of rows) {
-      const seriesTitleRaw = String(r?.grandparent_title || r?.title || "Series").trim();
-      if (/^jeopardy!?$/i.test(seriesTitleRaw)) continue; // skip Jeopardy! variants
-
-      const year = r?.grandparent_year || r?.year || null;
-      const seriesKey = `${seriesTitleRaw}::${year || ""}`;
-
-      // Series poster (not episode)
-      const poster = posterFrom({
-        grandparentThumb: r?.grandparent_thumb || r?.grandparentThumb,
-        poster: r?.grandparent_poster || r?.poster || null,
-      });
-
-      if (!bySeries.has(seriesKey)) {
-        bySeries.set(seriesKey, {
-          title: seriesTitleRaw,
-          year: year ? Number(year) : null,
-          poster,
-          episodes: [],
-        });
-      }
-
-      const group = bySeries.get(seriesKey);
-      group.episodes.push({
-        id: r?.rating_key || r?.ratingKey || r?.id,
-        season:
-          toIntOrNull(r?.parent_index) ??
-          toIntOrNull(r?.parentIndex) ??
-          toIntOrNull(r?.parent_media_index) ??
-          toIntOrNull(r?.seasonIndex) ??
-          toIntOrNull(r?.season) ??
-          null,
-        ep:
-          toIntOrNull(r?.index) ??
-          toIntOrNull(r?.episode) ??
-          toIntOrNull(r?.media_index) ??
-          toIntOrNull(r?.episodeIndex) ??
-          null,
-        name: r?.title || "Episode",
-        href: r?.webHref || r?.deepLink || r?.href || null,
-      });
-    }
-
-    // absolutize episode links
-    const seriesList = [...bySeries.values()];
-    await Promise.all(
-      seriesList.map(async (s) => {
-        await Promise.all(
-          s.episodes.map(async (e) => {
-            e.href = await absolutizePlexHref(e.href, e.id);
-          })
-        );
-      })
-    );
-
-    const makeTwoDigits = (n) => (n == null ? "??" : String(n).padStart(2, "0"));
-
-    const grid = seriesList.length
-      ? `<div style="display:flex;flex-direction:column;gap:16px">
-           ${seriesList
-             .map((s) => {
-               const left = s.poster
-                 ? `<div style="width:110px;flex-shrink:0">${posterImg(s.poster, s.title, 96, 144)}</div>`
-                 : `<div style="width:110px;flex-shrink:0"></div>`;
-               const header = `<div style="font-size:14px;font-weight:600;margin-bottom:6px">${htmlEscape(s.title)}${s.year ? ` (${s.year})` : ""}</div>`;
-               const lines = s.episodes.slice(0, 5).map((e) => {
-                 const label = `Season ${makeTwoDigits(e.season)}, Episode ${makeTwoDigits(e.ep)} — ${htmlEscape(e.name)}`;
-                 return e.href
-                   ? `<div><a href="${e.href}" target="_blank" rel="noreferrer" style="text-decoration:none;color:#93c5fd">${label}</a></div>`
-                   : `<div>${label}</div>`;
-               }).join("");
-               const more = s.episodes.length > 5 ? `<div style="opacity:.7;margin-top:4px">And more…</div>` : "";
-               const right = `<div style="flex:1;min-width:0;font-size:13px;line-height:1.45">${header}${lines}${more}</div>`;
-               return `<div style="display:flex;gap:14px;align-items:flex-start">${left}${right}</div>`;
-             })
-             .join("")}
-         </div>`
-      : `<div style="opacity:.75">No recent TV episodes in the last ${daysLocal} days.</div>`;
-
+    const rows =
+      pickRows(blocks, ["recently_added", "recently_added_tv", "recently_added_items"]) || [];
+    const items = rows
+      .filter((r) => ["episode", "season", "show"].includes(rowType(r)))
+      .map((r) => ({ title: r?.grandparent_title || r?.title || "Episode", poster: posterFrom(r) }))
+      .slice(0, 8);
+    const grid = items.length
+      ? `<div style="display:flex;flex-wrap:wrap;gap:10px">${items.map((x) => (x.poster ? posterImg(x.poster, x.title, 96, 144) : "")).join("")}</div>`
+      : `<div style="opacity:.75">Preview • Will populate dynamically on send (Last ${days} Days).</div>`;
     out = out.replaceAll("{{CARD_RECENT_EPISODES}}", cardHtml("Recently added TV Episodes", grid));
   }
 
@@ -1273,28 +858,32 @@ function nowParts() {
 const DOW_MAP = { sunday:0, monday:1, tuesday:2, wednesday:3, thursday:4, friday:5, saturday:6 };
 
 function matchCronField(field, value) {
+  // supports: "*" or comma-separated integers
   if (field === "*") return true;
   return field.split(",").some((tok) => Number(tok) === value);
 }
 function isDueCron(expr) {
+  // "m h dom mon dow"
   const parts = String(expr || "").trim().split(/\s+/);
   if (parts.length !== 5) return false;
   const [m, h, dom, mon, dow] = parts;
   const p = nowParts();
+  // dow in cron: 0 or 7 = Sunday; we map 0..6 where 0=Sunday
   const cronDow = (x) => (x === 7 ? 0 : x);
   const dowOk =
     dow === "*" || dow.split(",").some((tok) => cronDow(Number(tok)) === p.dow);
+
   return (
     matchCronField(m, p.m) &&
     matchCronField(h, p.h) &&
     matchCronField(dom, p.dom) &&
-    matchCronField(mon, p.mon + 1) &&
+    matchCronField(mon, p.mon + 1) && // cron months are 1..12
     dowOk
   );
 }
 function isDueStd(s) {
   const p = nowParts();
-  const minuteMatch = typeof s.minute === "number" ? s.minute === p.m : p.m === 0;
+  const minuteMatch = typeof s.minute === "number" ? s.minute === p.m : p.m === 0; // default :00
   const hourMatch = typeof s.hour === "number" ? s.hour === p.h : true;
   const freq = String(s.frequency || "").toLowerCase();
   if (freq === "hour") return minuteMatch;
@@ -1355,6 +944,7 @@ async function sendNewsletter(nl, { manual = false } = {}) {
   const tpl = templates.find((t) => t.id === nl.templateId);
   const rawHtml = tpl?.html || "<div style='opacity:.7'>No template selected.</div>";
 
+  // Expand tokens with latest data (historyDays falls back to config)
   const historyDays = typeof nl.historyDays === "number" ? nl.historyDays : CONFIG.lookbackDays || 7;
   const builtHtml = await renderTemplate(rawHtml, historyDays);
 
@@ -1387,18 +977,32 @@ async function sendNewsletter(nl, { manual = false } = {}) {
   console.log("[send] ok:", info.messageId);
   return true;
 }
-
 /* -------------------------- Newsletters: quick ping ------------------------ */
 app.get("/api/newsletters/__ping", (_req, res) => {
   res.json({ ok: true, msg: "newsletters API is alive" });
 });
 
 /* ----------------------- Newsletters: send-now (POST) ---------------------- */
+/**
+ * POST /api/newsletters/:id/send-now
+ * Body (all optional except content):
+ * {
+ *   subject?: string,          // default "Kunkflix Newsletter"
+ *   html?: string,             // preferred body
+ *   text?: string,             // fallback if no html
+ *   to?: string|string[],      // optional override recipients
+ *   bcc?: string|string[],     // optional override BCC
+ *   dryRun?: boolean           // validate only; don't send
+ * }
+ *
+ * If neither `to` nor `bcc` provided, uses recipients.json as BCC list.
+ */
 app.post("/api/newsletters/:id/send-now", async (req, res) => {
   try {
     const id = String(req.params.id || "unknown");
     const body = req.body || {};
 
+    // --- SMTP config check
     if (!CONFIG.smtpHost || !CONFIG.smtpPort || !CONFIG.fromAddress) {
       return res.status(400).json({
         ok: false,
@@ -1406,6 +1010,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       });
     }
 
+    // --- recipients
     const normalizeList = (v) =>
       (Array.isArray(v) ? v : (typeof v === "string" ? v.split(",") : []))
         .map((s) => String(s || "").trim().toLowerCase())
@@ -1424,6 +1029,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       return res.status(400).json({ ok: false, error: "No recipients found (recipients.json is empty)." });
     }
 
+    // --- content
     const subject = String(body.subject || "Kunkflix Newsletter").trim();
     const hasHtml = typeof body.html === "string" && body.html.trim().length > 0;
     const hasText = typeof body.text === "string" && body.text.trim().length > 0;
@@ -1431,10 +1037,12 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       return res.status(400).json({ ok: false, error: "Provide `html` and/or `text` in the body." });
     }
 
+    // --- transport
     const transport = nodemailer.createTransport(smtpTransportOptions(CONFIG));
     try { await transport.verify(); }
     catch (e) { return res.status(400).json({ ok: false, error: `SMTP verification failed: ${e?.message || e}` }); }
 
+    // --- message
     const msg = {
       from: CONFIG.fromAddress,
       to: toList.length ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
@@ -1445,6 +1053,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       headers: { "X-Kunkflix-Newsletter-ID": id },
     };
 
+    // --- dry run
     if (body.dryRun) {
       return res.json({
         ok: true,
@@ -1453,6 +1062,120 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       });
     }
 
+    // --- send
+    const info = await transport.sendMail(msg);
+    return res.json({
+      ok: true,
+      id,
+      accepted: info.accepted || [],
+      rejected: info.rejected || [],
+      envelope: info.envelope || {},
+      messageId: info.messageId || null,
+      response: info.response || null,
+      toCount: toList.length,
+      bccCount: bccList.length,
+    });
+  } catch (e) {
+    console.error("[send-now] error:", e);
+    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+  }
+});
+setTimeout(() => {
+  const routes = [];
+  for (const layer of (app._router?.stack || [])) {
+    if (layer.route?.path) {
+      routes.push({ path: layer.route.path, methods: Object.keys(layer.route.methods || {}) });
+    }
+  }
+  console.log("[diag] routes now registered:", routes);
+}, 100);
+
+/* -------------------------- Newsletters: quick ping ------------------------ */
+app.get("/api/newsletters/__ping", (_req, res) => {
+  res.json({ ok: true, msg: "newsletters API is alive" });
+});
+
+/* ----------------------- Newsletters: send-now (POST) ---------------------- */
+/**
+ * POST /api/newsletters/:id/send-now
+ * Body (all optional except content):
+ * {
+ *   subject?: string,          // default "Kunkflix Newsletter"
+ *   html?: string,             // preferred body
+ *   text?: string,             // fallback if no html
+ *   to?: string|string[],      // optional override recipients
+ *   bcc?: string|string[],     // optional override BCC
+ *   dryRun?: boolean           // validate only; don't send
+ * }
+ *
+ * If neither `to` nor `bcc` provided, uses recipients.json as BCC list.
+ */
+app.post("/api/newsletters/:id/send-now", async (req, res) => {
+  try {
+    const id = String(req.params.id || "unknown");
+    const body = req.body || {};
+
+    // --- SMTP config check
+    if (!CONFIG.smtpHost || !CONFIG.smtpPort || !CONFIG.fromAddress) {
+      return res.status(400).json({
+        ok: false,
+        error: "SMTP is not configured. Set smtpHost/smtpPort/fromAddress via /api/config.",
+      });
+    }
+
+    // --- recipients
+    const normalizeList = (v) =>
+      (Array.isArray(v) ? v : (typeof v === "string" ? v.split(",") : []))
+        .map((s) => String(s || "").trim().toLowerCase())
+        .filter((s) => isEmail(s));
+
+    let toList = normalizeList(body.to);
+    let bccList = normalizeList(body.bcc);
+
+    if (toList.length === 0 && bccList.length === 0) {
+      const saved = loadRecipientsSafe();
+      bccList = saved
+        .map((r) => String(r.email || "").trim().toLowerCase())
+        .filter((s) => isEmail(s));
+    }
+    if (toList.length === 0 && bccList.length === 0) {
+      return res.status(400).json({ ok: false, error: "No recipients found (recipients.json is empty)." });
+    }
+
+    // --- content
+    const subject = String(body.subject || "Kunkflix Newsletter").trim();
+    const hasHtml = typeof body.html === "string" && body.html.trim().length > 0;
+    const hasText = typeof body.text === "string" && body.text.trim().length > 0;
+    if (!hasHtml && !hasText) {
+      return res.status(400).json({ ok: false, error: "Provide `html` and/or `text` in the body." });
+    }
+
+    // --- transport
+    const transport = nodemailer.createTransport(smtpTransportOptions(CONFIG));
+    try { await transport.verify(); }
+    catch (e) { return res.status(400).json({ ok: false, error: `SMTP verification failed: ${e?.message || e}` }); }
+
+    // --- message
+    const msg = {
+      from: CONFIG.fromAddress,
+      to: toList.length ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
+      bcc: bccList.length ? bccList.join(", ") : undefined,
+      subject,
+      ...(hasHtml ? { html: body.html } : {}),
+      ...(hasText ? { text: body.text } : {}),
+      headers: { "X-Kunkflix-Newsletter-ID": id },
+    };
+
+    // --- dry run
+    if (body.dryRun) {
+      return res.json({
+        ok: true,
+        dryRun: true,
+        summary: { id, toCount: toList.length, bccCount: bccList.length, subject, hasHtml, hasText },
+      });
+    }
+
+    // --- send
     const info = await transport.sendMail(msg);
     return res.json({
       ok: true,

@@ -11,13 +11,22 @@
     "start": "node server/index.mjs"
   },
   "dependencies": {
+    "@lexical/history": "^0.34.0",
+    "@lexical/markdown": "^0.34.0",
+    "@lexical/plain-text": "^0.34.0",
+    "@lexical/react": "^0.34.0",
+    "@lexical/rich-text": "^0.34.0",
+    "@lexical/utils": "^0.34.0",
     "cors": "^2.8.5",
     "dotenv": "^16.6.1",
     "express": "^4.21.2",
+    "fast-xml-parser": "^5.2.5",
+    "lexical": "^0.34.0",
     "lucide-react": "^0.540.0",
     "nodemailer": "^6.10.1",
     "react": "^18.2.0",
-    "react-dom": "^18.2.0"
+    "react-dom": "^18.2.0",
+    "undici": "^7.14.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.0.0",

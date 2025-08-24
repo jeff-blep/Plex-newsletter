@@ -1,0 +1,27 @@
+[
+  {
+    "id": "jsqziyc94fjtfg2uv9u59g",
+    "name": "Weekly Shit",
+    "description": "Test",
+    "templateId": "8cidqqz4ld9bzeb6vgg2l",
+    "templateName": "Test",
+    "recipients": [
+      "kunkmasterflex@gmail.com"
+    ],
+    "schedule": {
+      "mode": "standard",
+      "frequency": "week",
+      "dayOfWeek": "sunday",
+      "dayOfMonth": 1,
+      "month": 0,
+      "hour": 8,
+      "minute": 0,
+      "cron": ""
+    },
+    "enabled": true,
+    "historyDays": 7,
+    "updatedAt": 1756045959177,
+    "createdAt": 1756045930148,
+    "lastSentAt": 1756064355130
+  }
+]

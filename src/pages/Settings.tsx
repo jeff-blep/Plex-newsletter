@@ -1,5 +1,6 @@
 import React from "react";
 import { getConfig, postConfig, testPlex, testTautulli } from "../api";
+import NewsletterCard from "./NewsletterCard";
 
 type Cfg = {
   plexUrl: string;
@@ -128,6 +129,10 @@ export default function Settings() {
             <input className="input input-bordered" value={fromAddress} readOnly />
           </label>
         </div>
+      </section>
+      {/* Newsletters */}
+      <section className="space-y-2">
+        <NewsletterCard />
       </section>
 
       {/* Plex */}

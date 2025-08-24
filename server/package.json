@@ -17,3 +17,10 @@
     "nodemailer": "^7.0.5"
   }
 }
+{
+  "scripts": {
+    "api": "node server/index.mjs",
+    "api:3101": "PORT=3101 node server/index.mjs",
+    "api:nodemon": "nodemon --watch server --ext mjs,json --exec \"node server/index.mjs\""
+  }
+}

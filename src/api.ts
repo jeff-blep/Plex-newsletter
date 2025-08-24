@@ -35,9 +35,13 @@ function toSecure(enc?: SMTPEnc): boolean {
 }
 
 /** ---------------- Connections: config ---------------- */
+export type OwnerRecommendation = {
+  plexItemId?: string | number;
+  note?: string;
+};
+
 export async function getConfig() {
   const data = await j<any>("/api/config");
-  // Server keys: smtpHost, smtpPort, smtpSecure, smtpUser, smtpPass, fromAddress, plexUrl, plexToken, tautulliUrl, tautulliApiKey, lookbackDays
   return {
     plexUrl: data.plexUrl || "",
     plexToken: data.plexToken || "",
@@ -52,6 +56,9 @@ export async function getConfig() {
     smtpEncryption: toEnc(!!data.smtpSecure, data.smtpPort),
 
     lookbackDays: typeof data.lookbackDays === "number" ? data.lookbackDays : 7,
+
+    // NEW: surface ownerRecommendation for persistence
+    ownerRecommendation: (data.ownerRecommendation ?? {}) as OwnerRecommendation,
   };
 }
 
@@ -78,6 +85,9 @@ export async function postConfig(body: {
   smtpEncryption?: SMTPEnc;
 
   lookbackDays?: number;
+
+  // NEW: allow writing ownerRecommendation to server
+  ownerRecommendation?: OwnerRecommendation;
 }) {
   const serverBody: any = pruneUndefined({
     // Plex / Tautulli
@@ -95,6 +105,9 @@ export async function postConfig(body: {
 
     // History lookback
     lookbackDays: body.lookbackDays,
+
+    // NEW: pass through to server (server already persists this)
+    ownerRecommendation: body.ownerRecommendation,
   });
 
   // Only send smtpPass if non-empty so we don’t clear stored value
@@ -237,4 +250,22 @@ export async function getTautulliHistory(afterEpochSeconds: number, length: numb
 /** NEW: libraries table for counts */
 export async function getTautulliLibrariesTable() {
   return tautulli("get_libraries_table");
+}
+
+// at bottom of src/api.ts (or near other newsletter helpers)
+export async function sendNewsletterNow(newsletterId: string) {
+  if (!newsletterId) throw new Error("Missing newsletter id");
+  return j(`/api/newsletters/${encodeURIComponent(newsletterId)}/send-now`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      subject: "Kunkflix Newsletter",
+      html: "<p>Test send from Kunkflix Newsletter.</p>",
+      // If you want to validate without sending, uncomment:
+      // dryRun: true,
+      // If you want to override recipients instead of using recipients.json:
+      // to: "you@example.com",
+      // bcc: ["a@example.com","b@example.com"],
+    }),
+  });
 }

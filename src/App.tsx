@@ -4,9 +4,11 @@ import { Moon, Sun } from "lucide-react";
 import ConnectionSettingsModal from "./components/ConnectionSettingsModal";
 import PlexMediaServerDataCard from "./components/PlexMediaServerDataCard";
 import OwnerRecommendationCard from "./components/OwnerRecommendationCard";
-import ScheduleCard, { type ScheduleCardHandle } from "./components/ScheduleCard";
+// NOTE: removed ScheduleCard import
 import HistoryCard from "./components/HistoryCard";
 import RecipientsCard from "./components/RecipientsCard";
+import EmailTemplateCard from "./components/EmailTemplateCard";
+import NewsletterCard from "./components/NewsletterCard";
 import { getStatus } from "./api";
 
 type ConnStatus = {
@@ -17,7 +19,6 @@ type ConnStatus = {
 
 export default function App() {
   const [showConn, setShowConn] = React.useState(false);
-  const scheduleRef = React.useRef<ScheduleCardHandle>(null);
 
   // theme toggle (persisted)
   const [theme, setTheme] = React.useState<"light" | "dark">(() => {
@@ -29,7 +30,7 @@ export default function App() {
     localStorage.setItem("theme", theme);
   }, [theme]);
 
-  // --- Connection status for the card ---
+  // Connection status
   const [connStatus, setConnStatus] = React.useState<ConnStatus>({
     emailOk: false,
     plexOk: false,
@@ -55,38 +56,22 @@ export default function App() {
     }
   }, []);
 
-  // initial load
+  React.useEffect(() => { refreshStatus(); }, [refreshStatus]);
   React.useEffect(() => {
-    refreshStatus();
-  }, [refreshStatus]);
-
-  // refresh when tab regains focus
-  React.useEffect(() => {
-    const onVis = () => {
-      if (document.visibilityState === "visible") refreshStatus();
-    };
+    const onVis = () => { if (document.visibilityState === "visible") refreshStatus(); };
     document.addEventListener("visibilitychange", onVis);
     return () => document.removeEventListener("visibilitychange", onVis);
   }, [refreshStatus]);
 
-  const handleConnClose = () => {
-    setShowConn(false);
-    setTimeout(() => refreshStatus(), 150);
-  };
-
-  const handleConnSaved = () => {
-    setShowConn(false);
-    refreshStatus();
-  };
+  const handleConnClose = () => { setShowConn(false); setTimeout(() => refreshStatus(), 150); };
+  const handleConnSaved = () => { setShowConn(false); refreshStatus(); };
 
   return (
     <div className="min-h-screen bg-base-100 text-base-content">
       {/* FIXED TOP BANNER */}
       <header className="fixed top-0 inset-x-0 z-50 bg-base-100 border-b border-base-300">
         <div className="px-5 py-3 flex items-center justify-between max-w-6xl mx-auto">
-          <h1 className="text-xl font-semibold truncate">
-            Newzletr • Settings
-          </h1>
+          <h1 className="text-xl font-semibold truncate">Newzletr • Settings</h1>
           <button
             className="btn btn-sm"
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
@@ -108,31 +93,11 @@ export default function App() {
         </div>
       </header>
 
-      {/* Offset for fixed header */}
+      {/* Offset */}
       <main className="max-w-6xl mx-auto p-5 pt-14 mt-6 space-y-6">
-        {/* Top row: Schedule, Connection Settings, History */}
+        {/* Top row — now just Connection + History */}
         <section className="grid gap-4 md:grid-cols-3">
-          {/* Schedule — ENTIRE CARD CLICKABLE */}
-          <div
-            className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition cursor-pointer focus:outline-none"
-            role="button"
-            tabIndex={0}
-            onClick={() => scheduleRef.current?.open()}
-            onKeyDown={(e) => (e.key === "Enter" || e.key === " ") && scheduleRef.current?.open()}
-          >
-            <div className="card-body p-3">
-              <h2 className="text-xl font-semibold">Sending Schedule</h2>
-              <p className="text-xs md:text-sm opacity-70">
-                When the newsletter will be automatically sent
-              </p>
-              <div className="mt-8">
-                {/* Centered summary only; modal opened by ref */}
-                <ScheduleCard ref={scheduleRef} />
-              </div>
-            </div>
-          </div>
-
-          {/* Connection Settings — opens Connection Settings modal */}
+          {/* Connection Settings */}
           <div
             className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition cursor-pointer"
             role="button"
@@ -142,9 +107,7 @@ export default function App() {
           >
             <div className="card-body p-3">
               <h2 className="text-xl font-semibold">Connection Settings</h2>
-              <p className="text-xs md:text-sm opacity-70">
-                Configure Email (SMTP), Plex, and Tautulli connections.
-              </p>
+              <p className="text-xs md:text-sm opacity-70">Configure Email (SMTP), Plex, and Tautulli connections.</p>
 
               <div className="mt-6 text-sm md:text-base">
                 {statusLoading ? (
@@ -163,12 +126,10 @@ export default function App() {
           </div>
 
           {/* History */}
-          <div className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition">
+          <div className="card bg-base-200 shadow-sm card-compact hover:ring-2 hover:ring-primary/60 transition md:col-span-2">
             <div className="card-body p-3">
               <h2 className="text-xl font-semibold">History</h2>
-              <p className="text-xs md:text-sm opacity-70">
-                How many days to pull data for the newsletter
-              </p>
+              <p className="text-xs md:text-sm opacity-70">How many days to pull data for the newsletter</p>
               <div className="mt-3 text-sm">
                 <HistoryCard />
               </div>
@@ -179,20 +140,37 @@ export default function App() {
         {/* Plex Media Server Data */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="text-xl font-semibold">Plex Media Server Data (Last 7 days)</h2>
+            <h2 className="text-xl font-semibold">Plex Media Server Data</h2>
             <div className="mt-2">
               <PlexMediaServerDataCard />
             </div>
           </div>
         </section>
 
-        {/* Owner Recommendation */}
+        {/* Host Recommendation */}
         <section className="card bg-base-200 shadow-sm">
           <div className="card-body">
-            <h2 className="text-xl font-semibold">Owner Recommendation</h2>
+            <h2 className="text-xl font-semibold">Plex Media Server Host’s Recommendation</h2>
             <div className="mt-3">
               <OwnerRecommendationCard />
             </div>
+          </div>
+        </section>
+
+        {/* Email Template (editor) */}
+        <section className="card bg-base-200 shadow-sm">
+          <div className="card-body">
+            <h2 className="text-xl font-semibold">Email Template</h2>
+            <div className="mt-3">
+              <EmailTemplateCard />
+            </div>
+          </div>
+        </section>
+
+        {/* Newsletters */}
+        <section className="card bg-base-200 shadow-sm">
+          <div className="card-body">
+            <NewsletterCard />
           </div>
         </section>
 

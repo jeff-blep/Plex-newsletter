@@ -47,22 +47,21 @@ function splitTwo<T>(arr: T[]) {
    lg.png, playstation.png, chromecast.png, macos.png, xbox.png, generic.png
 */
 const PLATFORM_FILE_MAP: Record<string, string> = {
-  appletv: "atv.png",          // Apple TV / tvOS
+  appletv: "atv.png",
   roku: "roku.png",
-  androidtv: "android.png",    // if you have a separate androidtv.png, change this
+  androidtv: "android.png",
   android: "android.png",
   ios: "ios.png",
-  samsung: "samsung.png",      // Samsung TV / Tizen
+  samsung: "samsung.png",
   chrome: "chrome.png",
   safari: "safari.png",
-  lg: "lg.png",                // LG webOS
+  lg: "lg.png",
   playstation: "playstation.png",
   chromecast: "chromecast.png",
   macos: "macos.png",
   xbox: "xbox.png",
 };
 
-/** Friendly labels for normalized platform keys */
 const PLATFORM_LABEL_MAP: Record<string, string> = {
   appletv: "Apple TV",
   samsung: "Samsung TV",
@@ -99,42 +98,21 @@ function emojiForKey(key: string): string {
   return PLATFORM_EMOJI[key] || "🧩";
 }
 
-/** Normalize Tautulli labels to our keys above. */
 function normalizePlatform(name: string): string {
   const raw = String(name || "").toLowerCase().trim();
-
-  // Apple TV
   if (raw.includes("apple tv") || raw.includes("tvos") || raw.includes("appletv")) return "appletv";
-
-  // Samsung TV / Tizen
   if (raw.includes("samsung tv") || raw.includes("tizen") || raw === "samsung") return "samsung";
-
-  // LG / webOS
   if (raw.includes("webos") || raw.includes("lg")) return "lg";
-
-  // Browsers / Plex Web
   if (raw.includes("plex web") || raw.includes("chrome")) return "chrome";
   if (raw.includes("safari")) return "safari";
-
-  // Android TV vs Android (Plex App (Android))
   if (raw.includes("android tv")) return "androidtv";
   if (raw.includes("plex app (android)") || raw === "android" || raw.includes("android")) return "android";
-
-  // iOS family (Plex App (iOS), iPhone/iPad/iOS)
   if (raw.includes("plex app (ios)") || raw.includes("iphone") || raw.includes("ipad") || raw.includes("ios")) return "ios";
-
-  // Chromecast / Roku
   if (raw.includes("chromecast")) return "chromecast";
   if (raw.includes("roku")) return "roku";
-
-  // Consoles
   if (raw.includes("xbox")) return "xbox";
   if (raw.includes("playstation") || raw.includes("ps4") || raw.includes("ps5")) return "playstation";
-
-  // macOS desktop app
   if (raw.includes("macos") || raw.includes("plex app (macos)")) return "macos";
-
-  // Fallback: stable key (may map to generic)
   return raw.replace(/[\s_]+/g, "").replace(/[^a-z0-9-]/g, "");
 }
 
@@ -157,7 +135,6 @@ function PlatformIcon({
       ? "w-14 h-14 object-cover rounded-md"
       : "w-5 h-5 object-contain";
 
-  // Try PNG in /public/platforms
   if (!failed && file) {
     return (
       <img
@@ -170,7 +147,6 @@ function PlatformIcon({
     );
   }
 
-  // Emoji fallback if PNG missing
   if (size === "poster") {
     return (
       <div
@@ -192,6 +168,9 @@ function thumbUrl(row: any): string | null {
 }
 
 export default function PlexMediaServerDataCard({ days = 7 }: { days?: number }) {
+  // NEW: effective lookback window (defaults to prop, then loads from config, and listens to updates)
+  const [effectiveDays, setEffectiveDays] = useState<number>(days);
+
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
@@ -200,13 +179,42 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     movies: 0, series: 0, episodes: 0,
   });
 
+  // Load lookbackDays from config on mount
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await fetch("/api/config");
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+        const cfgDays = Number(j?.lookbackDays);
+        if (!cancelled && Number.isFinite(cfgDays)) setEffectiveDays(cfgDays);
+      } catch {
+        // ignore, fallback to existing state
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  // Listen for History card saves
+  useEffect(() => {
+    const onUpdate = (e: Event) => {
+      const ce = e as CustomEvent<any>;
+      const next = Number(ce?.detail);
+      if (Number.isFinite(next)) setEffectiveDays(next);
+    };
+    window.addEventListener("lookbackDays:update", onUpdate as EventListener);
+    return () => window.removeEventListener("lookbackDays:update", onUpdate as EventListener);
+  }, []);
+
+  // Fetch summary + library totals whenever effectiveDays changes
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setErr(null);
 
     // Summary for selected window
-    fetch(`/api/tautulli/summary?days=${encodeURIComponent(days)}`)
+    fetch(`/api/tautulli/summary?days=${encodeURIComponent(effectiveDays)}`)
       .then(r => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
@@ -220,8 +228,13 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     // Library counts
     (async () => {
       try {
-        const t = await getTautulliLibrariesTable();
-        const rows: any[] = Array.isArray((t as any)?.data) ? (t as any).data : [];
+        const r = await fetch(`/api/tautulli?cmd=get_libraries_table`);
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const j = await r.json();
+
+        // Ground-truth shape is { data: { data: [...] } }
+        const rows: any[] = Array.isArray(j?.data?.data) ? j.data.data : [];
+
         let movies = 0, series = 0, episodes = 0;
         for (const row of rows) {
           const type = String(row?.section_type || "").toLowerCase();
@@ -229,18 +242,17 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
             movies += Number(row?.count ?? 0) | 0;
           } else if (type === "show") {
             series += Number(row?.count ?? 0) | 0;
-            const ep = (row?.grandchild_count ?? row?.child_count ?? 0);
-            episodes += Number(ep) | 0;
+            episodes += Number(row?.grandchild_count ?? row?.child_count ?? 0) | 0;
           }
         }
         if (!cancelled) setLibTotals({ movies, series, episodes });
       } catch (e) {
-        console.warn("[PlexMediaServerDataCard] get_libraries_table failed:", e);
+        console.warn("[PlexMediaServerDataCard] libraries_table fetch failed:", e);
       }
     })();
 
     return () => { cancelled = true; };
-  }, [days]);
+  }, [effectiveDays]);
 
   const rowsMovies = useMemo(
     () => pickHomeRows(summary?.home, ["top_movies", "most_watched_movies"]).slice(0, 6),
@@ -261,7 +273,10 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-end min-h-6">
+      <div className="flex items-center justify-between min-h-6">
+        <div className="text-sm opacity-70">
+          Window: last <b>{effectiveDays}</b> day{effectiveDays === 1 ? "" : "s"}
+        </div>
         {loading ? <span className="loading loading-spinner loading-sm" /> : null}
       </div>
 
@@ -290,15 +305,24 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
       {/* Summary strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
-          <div className="text-sm opacity-70 flex items-center gap-2"><span>🎬</span> Movies Streamed</div>
+          <div className="text-sm opacity-70 flex items-center gap-2">
+            <span>🎬</span> Movies Streamed
+            <span className="opacity-60"> (Last {effectiveDays} Days)</span>
+          </div>
           <div className="text-2xl font-semibold">{fmt(summary?.totals?.movies)}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
-          <div className="text-sm opacity-70 flex items-center gap-2"><span>📺</span> TV Episodes Streamed</div>
+          <div className="text-sm opacity-70 flex items-center gap-2">
+            <span>📺</span> TV Episodes Streamed
+            <span className="opacity-60"> (Last {effectiveDays} Days)</span>
+          </div>
           <div className="text-2xl font-semibold">{fmt(summary?.totals?.episodes)}</div>
         </div>
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
-          <div className="text-sm opacity-70 flex items-center gap-2"><span>⏱️</span> Total Hours Streamed</div>
+          <div className="text-sm opacity-70 flex items-center gap-2">
+            <span>⏱️</span> Total Hours Streamed
+            <span className="opacity-60"> (Last {effectiveDays} Days)</span>
+          </div>
           <div className="text-2xl font-semibold">{hhmm(summary?.totals?.total_time_seconds)}</div>
         </div>
       </div>

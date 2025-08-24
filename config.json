@@ -14,5 +14,5 @@
     "tautulli": "ok",
     "smtp": "ok"
   },
-  "lookbackDays": 7
+  "lookbackDays": 14
 }

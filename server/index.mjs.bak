@@ -14,7 +14,7 @@ async function loadRouter(modUrl, name) {
       mod.default,
       mod.router,
       mod.routes,
-      mod[name],            // e.g., plex, tautulli
+      mod[name],
       typeof mod.createRouter === "function" ? mod.createRouter() : undefined,
     ];
     const router = candidates.find(
@@ -83,7 +83,9 @@ let CONFIG = loadConfig();
 
 /* --------------------------- recipients persistence ------------------------ */
 const RECIPIENTS_PATH = path.join(__dirname, "recipients.json");
-
+function isEmail(s) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+}
 function loadRecipientsSafe() {
   try {
     if (!fs.existsSync(RECIPIENTS_PATH)) {
@@ -100,15 +102,42 @@ function loadRecipientsSafe() {
 function saveRecipientsSafe(list) {
   try {
     fs.writeFileSync(RECIPIENTS_PATH, JSON.stringify(list, null, 2), "utf8");
-    console.log("[recipients] wrote", RECIPIENTS_PATH);
+    console.log("[recipients] wrote", RECIPIENTS_PATH, `(${list.length} items)`);
     return true;
   } catch (e) {
     console.error("[recipients] write failed:", e?.message || e);
     return false;
   }
 }
-function isEmail(s) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(String(s || "").trim());
+
+/* ---------------------------- templates persistence ------------------------ */
+const TEMPLATES_PATH = path.join(__dirname, "emailtemplates.json");
+
+function loadTemplatesSafe() {
+  try {
+    if (!fs.existsSync(TEMPLATES_PATH)) {
+      fs.writeFileSync(TEMPLATES_PATH, "[]", "utf8");
+    }
+    const txt = fs.readFileSync(TEMPLATES_PATH, "utf8");
+    const arr = JSON.parse(txt);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) {
+    console.error("[templates] load failed:", e?.message || e);
+    return [];
+  }
+}
+function saveTemplatesSafe(list) {
+  try {
+    fs.writeFileSync(TEMPLATES_PATH, JSON.stringify(list, null, 2), "utf8");
+    console.log("[templates] wrote", TEMPLATES_PATH, `(${list.length} items)`);
+    return true;
+  } catch (e) {
+    console.error("[templates] write failed:", e?.message || e);
+    return false;
+  }
+}
+function newId() {
+  return Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 }
 
 /* -------------------------------- helpers --------------------------------- */
@@ -121,7 +150,6 @@ function applyIncomingSmtp(body, cfg) {
   if (typeof body.fromAddress === "string") cfg.fromAddress = body.fromAddress;
 
   if (typeof body.smtpServer === "string") cfg.smtpHost = body.smtpServer;
-  if (typeof body.smtpPort === "number") cfg.smtpPort = body.smtpPort;
   if (typeof body.smtpEmailLogin === "string") cfg.smtpUser = body.smtpEmailLogin;
   if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0)
     cfg.smtpPass = body.smtpEmailPassword;
@@ -144,7 +172,9 @@ function smtpTransportOptions(cfg) {
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
-app.get("/__whoami", (_req, res) => res.json({ file: __filename, configPath: CONFIG_PATH, recipientsPath: RECIPIENTS_PATH }));
+app.get("/__whoami", (_req, res) =>
+  res.json({ file: __filename, configPath: CONFIG_PATH, recipientsPath: RECIPIENTS_PATH, templatesPath: TEMPLATES_PATH })
+);
 
 /* --------------------------- mount feature routers ------------------------- */
 const plexRouter = await loadRouter(new URL("./routes/plex.mjs", import.meta.url), "plex");
@@ -173,12 +203,10 @@ app.get("/api/schedule", (_req, res) => {
   res.json({ jobs: [] });
 });
 
-/* --------------------- recipients API (NEW — persistent) ------------------- */
-// GET list of recipients
+/* --------------------- recipients API (persistent file) -------------------- */
 app.get("/api/recipients", (_req, res) => {
   res.json(loadRecipientsSafe());
 });
-// POST full replacement list
 app.post("/api/recipients", (req, res) => {
   const payload = Array.isArray(req.body) ? req.body : [];
   const cleaned = payload
@@ -187,13 +215,63 @@ app.post("/api/recipients", (req, res) => {
       email: String(r?.email || "").trim().toLowerCase(),
     }))
     .filter((r) => isEmail(r.email))
-    // de-dup by email
-    .reduce((acc, r) => (acc.find(x => x.email === r.email) ? acc : acc.concat(r)), []);
-
+    .reduce((acc, r) => (acc.find((x) => x.email === r.email) ? acc : acc.concat(r)), []);
   if (!saveRecipientsSafe(cleaned)) {
     return res.status(500).json({ ok: false, error: "Failed to write recipients.json" });
   }
   res.json({ ok: true, recipients: cleaned });
+});
+
+/* ---------------------- templates API (persistent file) -------------------- */
+// GET all templates
+app.get("/api/templates", (_req, res) => {
+  res.json(loadTemplatesSafe());
+});
+// POST create/update by name (idempotent on name)
+app.post("/api/templates", (req, res) => {
+  const name = String(req.body?.name || "").trim();
+  const html = String(req.body?.html ?? "");
+
+  // NEW: optional historyDays (clamped 1..90)
+  let historyDays = req.body?.historyDays;
+  if (typeof historyDays !== "number" || Number.isNaN(historyDays)) {
+    historyDays = undefined;
+  } else {
+    historyDays = Math.max(1, Math.min(90, Math.floor(historyDays)));
+  }
+
+  if (!name) return res.status(400).json({ ok: false, error: "Missing template name" });
+
+  const list = loadTemplatesSafe();
+  const now = Date.now();
+
+  // If name exists, update; else add new
+  const existing = list.find((t) => t.name.toLowerCase() === name.toLowerCase());
+  if (existing) {
+    existing.html = html;
+    if (historyDays !== undefined) existing.historyDays = historyDays; // persist if provided
+    existing.updatedAt = now;
+  } else {
+    const item = { id: newId(), name, html, updatedAt: now };
+    if (historyDays !== undefined) item.historyDays = historyDays;
+    list.push(item);
+  }
+
+  if (!saveTemplatesSafe(list)) {
+    return res.status(500).json({ ok: false, error: "Failed to write emailtemplates.json" });
+  }
+  res.json({ ok: true, templates: list });
+});
+// DELETE by id
+app.delete("/api/templates/:id", (req, res) => {
+  const id = String(req.params.id || "");
+  if (!id) return res.status(400).json({ ok: false, error: "Missing id" });
+  const list = loadTemplatesSafe();
+  const next = list.filter((t) => t.id !== id);
+  if (!saveTemplatesSafe(next)) {
+    return res.status(500).json({ ok: false, error: "Failed to write emailtemplates.json" });
+  }
+  res.json({ ok: true, templates: next });
 });
 
 /* -------------------------------- API routes ------------------------------ */
@@ -227,11 +305,23 @@ app.post("/api/test/plex", async (req, res) => {
     const urlWithScheme = /^https?:\/\//i.test(plexUrl) ? plexUrl : `http://${plexUrl}`;
     const sep = urlWithScheme.includes("?") ? "&" : "?";
     const probe = `${urlWithScheme}${sep}X-Plex-Token=${encodeURIComponent(plexToken)}`;
-    const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 5000);
-    let r; try { r = await fetch(probe, { method: "GET", signal: ac.signal }); } finally { clearTimeout(timer); }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    let r;
+    try {
+      r = await fetch(probe, { method: "GET", signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
-    CONFIG.lastTest.plex = "ok"; saveConfig(CONFIG); res.json({ ok: true });
-  } catch (e) { CONFIG.lastTest.plex = "fail"; saveConfig(CONFIG); res.json({ ok: false, error: e?.message || String(e) }); }
+    CONFIG.lastTest.plex = "ok";
+    saveConfig(CONFIG);
+    res.json({ ok: true });
+  } catch (e) {
+    CONFIG.lastTest.plex = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: e?.message || String(e) });
+  }
 });
 app.post("/api/test-plex", (req, res) =>
   app._router.handle({ ...req, url: "/api/test/plex", method: "POST" }, res, () => {})
@@ -244,20 +334,40 @@ app.post("/api/test/tautulli", async (req, res) => {
     const tUrl = /^https?:\/\//i.test(tUrlRaw) ? tUrlRaw : `http://${tUrlRaw}`;
     const base = `${tUrl}`.replace(/\/+$/, "");
     const probe = `${base}/api/v2?apikey=${encodeURIComponent(apiKey)}&cmd=get_activity`;
-    const ac = new AbortController(); const timer = setTimeout(() => ac.abort(), 5000);
-    let r; try { r = await fetch(probe, { method: "GET", signal: ac.signal }); } finally { clearTimeout(timer); }
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    let r;
+    try {
+      r = await fetch(probe, { method: "GET", signal: ac.signal });
+    } finally {
+      clearTimeout(timer);
+    }
     if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}`);
     const json = await r.json().catch(() => null);
     const ok = json && json.response && json.response.result === "success";
     if (!ok) throw new Error("Unexpected response from Tautulli");
-    CONFIG.lastTest.tautulli = "ok"; saveConfig(CONFIG); res.json({ ok: true });
-  } catch (e) { CONFIG.lastTest.tautulli = "fail"; saveConfig(CONFIG); res.json({ ok: false, error: e?.message || String(e) }); }
+    CONFIG.lastTest.tautulli = "ok";
+    saveConfig(CONFIG);
+    res.json({ ok: true });
+  } catch (e) {
+    CONFIG.lastTest.tautulli = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: e?.message || String(e) });
+  }
 });
 app.post("/api/test-tautulli", (req, res) =>
   app._router.handle({ ...req, url: "/api/test/tautulli", method: "POST" }, res, () => {})
 );
 app.post("/api/test-email", async (req, res) => {
-  const merged = { ...CONFIG }; applyIncomingSmtp(req.body || {}, merged);
+  const merged = { ...CONFIG };
+  if (req.body && typeof req.body === "object") {
+    merged.smtpHost = req.body.smtpHost ?? merged.smtpHost;
+    merged.smtpPort = typeof req.body.smtpPort === "number" ? req.body.smtpPort : merged.smtpPort;
+    merged.smtpSecure = typeof req.body.smtpSecure === "boolean" ? req.body.smtpSecure : merged.smtpSecure;
+    merged.smtpUser = req.body.smtpUser ?? merged.smtpUser;
+    merged.smtpPass = req.body.smtpPass && req.body.smtpPass.length > 0 ? req.body.smtpPass : merged.smtpPass;
+    merged.fromAddress = req.body.fromAddress ?? merged.fromAddress ?? merged.smtpUser;
+  }
   try {
     if (!merged.smtpHost || !merged.smtpPort) throw new Error("Missing SMTP server/port");
     if (!merged.fromAddress) throw new Error("Missing From Address");
@@ -265,136 +375,149 @@ app.post("/api/test-email", async (req, res) => {
     await transport.verify();
     if (req.body && typeof req.body.to === "string" && req.body.to.length > 0) {
       await transport.sendMail({
-        from: merged.fromAddress, to: req.body.to,
+        from: merged.fromAddress,
+        to: req.body.to,
         subject: "Kunkflix Newsletter SMTP Test",
         text: "This is a test email confirming your SMTP settings are working.",
       });
     }
     applyIncomingSmtp(req.body || {}, CONFIG);
-    CONFIG.lastTest.smtp = "ok"; saveConfig(CONFIG);
+    CONFIG.lastTest.smtp = "ok";
+    saveConfig(CONFIG);
     res.json({ ok: true });
-  } catch (e) { CONFIG.lastTest.smtp = "fail"; saveConfig(CONFIG); res.json({ ok: false, error: e?.message || String(e) }); }
+  } catch (e) {
+    CONFIG.lastTest.smtp = "fail";
+    saveConfig(CONFIG);
+    res.json({ ok: false, error: e?.message || String(e) });
+  }
 });
 app.post("/api/test/smtp", (req, res) =>
   app._router.handle({ ...req, url: "/api/test-email", method: "POST" }, res, () => {})
 );
-/* ----------------------- send-now: blast a newsletter ---------------------- */
-/**
- * POST /api/newsletters/:id/send-now
- * Body (flexible; all optional except content):
- * {
- *   subject?: string,               // default: "Kunkflix Newsletter"
- *   html?: string,                  // preferred; raw HTML of the email
- *   text?: string,                  // fallback text if no html
- *   to?: string[] | string,         // override recipients; can be a single string or array
- *   bcc?: string[] | string,        // optional BCC override
- *   dryRun?: boolean                // if true, don't actually send; just validate & return summary
- * }
- *
- * If no `to` or `bcc` provided, the route will load ./recipients.json and send one message
- * with BCC to everyone (and a harmless "To: Undisclosed recipients").
- */
-app.post("/api/newsletters/:id/send-now", async (req, res) => {
+/* --------- Plex identity helpers (for official app.plex.tv links) --------- */
+let CACHED_PLEX_SERVER_ID = null;
+
+function trimRightSlash(u = "") {
+  return String(u || "").replace(/\/+$/, "");
+}
+
+async function fetchPlexIdentity() {
+  const base = trimRightSlash(CONFIG.plexUrl);
+  const token = CONFIG.plexToken || "";
+  if (!base || !token) throw new Error("Missing Plex URL or token in config.json");
+
+  const url = `${base}/identity?X-Plex-Token=${encodeURIComponent(token)}`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 5000);
   try {
-    const id = req.params.id || "unknown";
-    const body = req.body || {};
+    const r = await fetch(url, { signal: ac.signal });
+    const txt = await r.text();
+    if (!r.ok) throw new Error(`HTTP ${r.status} ${r.statusText}: ${txt}`);
 
-    // --- 1) Validate SMTP config
-    if (!CONFIG.smtpHost || !CONFIG.smtpPort || !CONFIG.fromAddress) {
-      return res.status(400).json({
-        ok: false,
-        error: "SMTP is not configured (smtpHost, smtpPort, fromAddress are required). Set them in /api/config.",
-      });
-    }
-
-    // --- 2) Determine recipients
-    let toList = [];
-    let bccList = [];
-
-    const normalizeList = (v) =>
-      (Array.isArray(v) ? v : (typeof v === "string" ? v.split(",") : []))
-        .map((s) => String(s || "").trim().toLowerCase())
-        .filter((s) => s.length > 0 && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
-
-    if (body.to) toList = normalizeList(body.to);
-    if (body.bcc) bccList = normalizeList(body.bcc);
-
-    if (toList.length === 0 && bccList.length === 0) {
-      // load recipients.json as default BCC list
-      const saved = loadRecipientsSafe();
-      bccList = saved.map((r) => String(r.email || "").trim().toLowerCase())
-                     .filter((s) => /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s));
-    }
-
-    if (toList.length === 0 && bccList.length === 0) {
-      return res.status(400).json({
-        ok: false,
-        error: "No recipients found (none provided and recipients.json is empty).",
-      });
-    }
-
-    // --- 3) Build content
-    const subject = String(body.subject || "Kunkflix Newsletter").trim();
-    const hasHtml = typeof body.html === "string" && body.html.trim().length > 0;
-    const hasText = typeof body.text === "string" && body.text.trim().length > 0;
-
-    if (!hasHtml && !hasText) {
-      return res.status(400).json({
-        ok: false,
-        error: "No email content provided. Include `html` and/or `text` in the request body.",
-      });
-    }
-
-    // --- 4) Transport
-    const transport = nodemailer.createTransport(smtpTransportOptions(CONFIG));
-
-    // Optionally verify before send (clearer SMTP errors)
-    try {
-      await transport.verify();
-    } catch (e) {
-      return res.status(400).json({
-        ok: false,
-        error: `SMTP verification failed: ${e?.message || e}`,
-      });
-    }
-
-    // --- 5) Prepare message
-    const msg = {
-      from: CONFIG.fromAddress,
-      to: toList.length > 0 ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
-      bcc: bccList.length > 0 ? bccList.join(", ") : undefined,
-      subject,
-      ...(hasHtml ? { html: body.html } : {}),
-      ...(hasText ? { text: body.text } : {}),
-      headers: { "X-Kunkflix-Newsletter-ID": id },
-    };
-
-    // --- 6) Dry run / send
-    if (body.dryRun) {
-      return res.json({
-        ok: true,
-        dryRun: true,
-        summary: { id, toCount: toList.length, bccCount: bccList.length, subject, hasHtml, hasText },
-      });
-    }
-
-    const info = await transport.sendMail(msg);
-
-    return res.json({
-      ok: true,
-      id,
-      accepted: info.accepted || [],
-      rejected: info.rejected || [],
-      envelope: info.envelope || {},
-      messageId: info.messageId || null,
-      response: info.response || null,
-      toCount: toList.length,
-      bccCount: bccList.length,
-    });
-  } catch (e) {
-    console.error("[send-now] error:", e);
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    // Extract machineIdentifier (the server ID) from the XML response
+    const idMatch = txt.match(/machineIdentifier="([^"]+)"/i);
+    const nameMatch = txt.match(/friendlyName="([^"]+)"/i);
+    const machineIdentifier = idMatch ? idMatch[1] : null;
+    const friendlyName = nameMatch ? nameMatch[1] : null;
+    return { machineIdentifier, friendlyName, raw: txt };
+  } finally {
+    clearTimeout(timer);
   }
+}
+
+/* GET /api/plex/identity  -> { machineIdentifier, friendlyName } */
+app.get("/api/plex/identity", async (_req, res) => {
+  try {
+    const { machineIdentifier, friendlyName } = await fetchPlexIdentity();
+    if (!machineIdentifier) return res.status(500).json({ error: "Unable to parse machineIdentifier" });
+    // cache for the life of the process
+    CACHED_PLEX_SERVER_ID = machineIdentifier;
+    res.json({ machineIdentifier, friendlyName });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+/* GET /api/plex/server-id  -> { machineIdentifier } (small convenience wrapper) */
+app.get("/api/plex/server-id", async (_req, res) => {
+  try {
+    if (CACHED_PLEX_SERVER_ID) return res.json({ machineIdentifier: CACHED_PLEX_SERVER_ID });
+    const { machineIdentifier } = await fetchPlexIdentity();
+    if (!machineIdentifier) return res.status(500).json({ error: "Unable to parse machineIdentifier" });
+    CACHED_PLEX_SERVER_ID = machineIdentifier;
+    res.json({ machineIdentifier });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+// --- minimal helpers (local to this file) ---
+function trimSlash(u = "") { return String(u || "").replace(/\/+$/, ""); }
+async function fetchWithTimeout(url, ms = 6000) {
+  const ac = new AbortController();
+  const t = setTimeout(() => ac.abort(), ms);
+  try { return await fetch(url, { signal: ac.signal }); }
+  finally { clearTimeout(t); }
+}
+
+// --- NEW: expose Plex identity + server-id directly ---
+app.get("/api/plex/identity", async (_req, res) => {
+  try {
+    const base = trimSlash(CONFIG.plexUrl || "");
+    const token = CONFIG.plexToken || "";
+    if (!base || !token) return res.status(400).json({ error: "Missing Plex config" });
+
+    const r = await fetchWithTimeout(`${base}/identity?X-Plex-Token=${encodeURIComponent(token)}`, 6000);
+    const text = await r.text();
+    if (!r.ok) return res.status(r.status).send(text);
+
+    const machineIdentifier = text.match(/machineIdentifier="([^"]+)"/i)?.[1] || null;
+    const friendlyName = text.match(/friendlyName="([^"]+)"/i)?.[1] || null;
+    if (!machineIdentifier) return res.status(500).json({ error: "Unable to parse machineIdentifier" });
+
+    res.json({ machineIdentifier, friendlyName });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+
+app.get("/api/plex/server-id", async (_req, res) => {
+  try {
+    const base = trimSlash(CONFIG.plexUrl || "");
+    const token = CONFIG.plexToken || "";
+    if (!base || !token) return res.status(400).json({ error: "Missing Plex config" });
+
+    const r = await fetchWithTimeout(`${base}/identity?X-Plex-Token=${encodeURIComponent(token)}`, 6000);
+    const text = await r.text();
+    if (!r.ok) return res.status(r.status).send(text);
+
+    const machineIdentifier = text.match(/machineIdentifier="([^"]+)"/i)?.[1] || null;
+    if (!machineIdentifier) return res.status(500).json({ error: "Unable to parse machineIdentifier" });
+
+    res.json({ machineIdentifier });
+  } catch (e) {
+    res.status(500).json({ error: String(e) });
+  }
+});
+// ---- DIAG 1: list routes on startup (once)
+setTimeout(() => {
+  const stack = (app._router && app._router.stack) || [];
+  const routes = [];
+  for (const layer of stack) {
+    if (layer.route && layer.route.path) {
+      const methods = Object.keys(layer.route.methods || {}).filter(Boolean);
+      routes.push({ path: layer.route.path, methods });
+    }
+  }
+  console.log("[diag] routes now registered:", routes);
+}, 100);
+
+// ---- DIAG 2: log any /api/newsletters misses (404s reaching here)
+app.use((req, _res, next) => {
+  if (req.path.startsWith("/api/newsletters")) {
+    console.log("[diag] hit newsletters path:", req.method, req.path, "— handler may be missing above");
+  }
+  next();
 });
 /* --------------------------------- start ---------------------------------- */
 const PORT = process.env.PORT || 3001;
@@ -402,4 +525,5 @@ app.listen(PORT, () => {
   console.log(`API listening on http://localhost:${PORT}`);
   console.log(`config.json -> ${CONFIG_PATH}`);
   console.log(`recipients.json -> ${RECIPIENTS_PATH}`);
+  console.log(`emailtemplates.json -> ${TEMPLATES_PATH}`);
 });

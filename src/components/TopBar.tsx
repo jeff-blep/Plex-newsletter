@@ -30,7 +30,7 @@ export default function TopBar({ rightSlot }: { rightSlot?: React.ReactNode }) {
       <div className="mx-auto max-w-7xl px-4 sm:px-6 lg:px-8 h-14 flex items-center justify-between">
         {/* Left: Brand + section */}
         <div className="flex items-center gap-2 min-w-0">
-          <span className="font-semibold text-base truncate">Newzletr</span>
+          <span className="font-semibold text-base truncate">Newzlettr</span>
           <span className="opacity-60">•</span>
           <span className="opacity-70 truncate">Settings</span>
         </div>
