@@ -6,7 +6,7 @@ import path from "path";
 import nodemailer from "nodemailer";
 import { fileURLToPath } from "url";
 
-console.log("[BOOT] index.mjs v7 — starting server file:", new Date().toISOString());
+console.log("[BOOT] index.mjs v8 — starting server file:", new Date().toISOString());
 
 /* ---------------------- helper: dynamic router loader ---------------------- */
 async function loadRouter(modUrl, name) {
@@ -44,6 +44,10 @@ async function loadRouter(modUrl, name) {
 /* ---------------------------- ESM dirname utils --------------------------- */
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+
+// Build absolute URLs for emails/assets if PUBLIC_ORIGIN is provided (e.g., http://your-server:3001)
+const PUBLIC_ORIGIN = process.env.PUBLIC_ORIGIN || ""; // example: "http://your-server:3001"
+const absUrl = (p) => (PUBLIC_ORIGIN ? `${PUBLIC_ORIGIN}${p}` : p);
 
 /* ------------------------------- config I/O -------------------------------- */
 const CONFIG_PATH = path.join(__dirname, "config.json");
@@ -190,6 +194,71 @@ function smtpTransportOptions(cfg) {
 
 /* --------------------------------- app ------------------------------------ */
 const app = express();
+// ---- HARD GUARD: short-circuit ALL /api/tautulli/* unless tested OK ----
+app.all('/api/tautulli/*', (req, res, next) => {
+  try {
+    // Treat Tautulli as enabled only when explicitly tested OK
+    const url = String((CONFIG?.tautulli?.baseUrl ?? CONFIG?.tautulliUrl) || '').trim();
+    const key = String((CONFIG?.tautulli?.apiKey   ?? CONFIG?.tautulliApiKey) || '').trim();
+    const testedOk = (CONFIG?.lastTest?.tautulli === 'ok');
+
+    const notConfigured = !url || !key;
+    const disabled = notConfigured || !testedOk;
+
+    if (disabled) {
+      const rel = String(req.path || '');
+      if (rel.includes('summary')) {
+        return res.status(200).json({ disabled: true, reason: notConfigured ? 'TAUTULLI_NOT_CONFIGURED' : 'TAUTULLI_NOT_TESTED', home: [], rows: [] });
+      }
+      if (rel.includes('recent')) {
+        return res.status(200).json({ disabled: true, reason: notConfigured ? 'TAUTULLI_NOT_CONFIGURED' : 'TAUTULLI_NOT_TESTED', rows: [] });
+      }
+      return res.status(200).json({ disabled: true, reason: notConfigured ? 'TAUTULLI_NOT_CONFIGURED' : 'TAUTULLI_NOT_TESTED' });
+    }
+  } catch {}
+  next();
+});
+// ---- Guards: disable Tautulli when not configured ----
+const CONFIG_PATHS = [
+  path.resolve(process.cwd(), "server/config.json"),
+  path.resolve(process.cwd(), "config.json"),
+];
+
+function readConfigSync() {
+  for (const p of CONFIG_PATHS) {
+    try {
+      if (fs.existsSync(p)) {
+        const txt = fs.readFileSync(p, "utf8");
+        return JSON.parse(txt);
+      }
+    } catch {}
+  }
+  return {};
+}
+
+function tautulliConfigured(cfg) {
+  // support both shapes: flat (tautulliUrl/apiKey) and nested (tautulli.baseUrl/apiKey)
+  const url = cfg?.tautulli?.baseUrl ?? cfg?.tautulliUrl ?? "";
+  const key = cfg?.tautulli?.apiKey ?? cfg?.tautulliApiKey ?? "";
+  return !!(url && key);
+}
+
+// This guard short-circuits ALL /api/tautulli/* routes when not configured
+app.use("/api/tautulli", (req, res, next) => {
+  const cfg = readConfigSync();
+  if (!tautulliConfigured(cfg)) {
+    // try to return a sensible shape for common endpoints
+    const q = String(req.path || "");
+    if (q.includes("summary")) {
+      return res.status(200).json({ disabled: true, reason: "TAUTULLI_NOT_CONFIGURED", home: [], rows: [] });
+    }
+    if (q.includes("recent")) {
+      return res.status(200).json({ disabled: true, reason: "TAUTULLI_NOT_CONFIGURED", rows: [] });
+    }
+    return res.status(200).json({ disabled: true, reason: "TAUTULLI_NOT_CONFIGURED" });
+  }
+  next();
+});
 app.use(cors({ origin: "*" }));
 app.use(express.json({ limit: "2mb" }));
 
@@ -226,6 +295,7 @@ const plexRouter = await loadRouter(new URL("./routes/plex.mjs", import.meta.url
 const tautulliRouter = await loadRouter(new URL("./routes/tautulli.mjs", import.meta.url), "tautulli");
 if (plexRouter) app.use("/api/plex", plexRouter);
 if (tautulliRouter) app.use("/api/tautulli", tautulliRouter);
+console.log("[router] tautulli: ENABLED (guard in index.mjs will gate access)");
 
 /* -------------------------- tiny debug observability ----------------------- */
 app.get("/api/_routes", (_req, res) => {
@@ -326,9 +396,11 @@ app.post("/api/newsletters", (req, res) => {
     const updatedAt = typeof n?.updatedAt === "number" ? n.updatedAt : Date.now();
     const createdAt = typeof n?.createdAt === "number" ? n.createdAt : Date.now();
     const lastSentAt = typeof n?.lastSentAt === "number" ? n.lastSentAt : undefined;
+
     return {
       id,
       name: String(n?.name || ""),
+      subject: String(n?.subject || ""),            // <— persist subject
       description: String(n?.description || ""),
       templateId: n?.templateId ? String(n.templateId) : undefined,
       templateName: n?.templateName ? String(n.templateName) : undefined,
@@ -359,26 +431,6 @@ app.delete("/api/newsletters/:id", (req, res) => {
   }
   restartScheduler();
   res.json({ ok: true, newsletters: next });
-});
-
-/* ---- Send-now (manual trigger for a single newsletter id) ---- */
-app.post("/api/newsletters/:id/send-now", async (req, res) => {
-  const id = String(req.params.id || "");
-  const list = loadNewslettersSafe();
-  const nl = list.find((x) => x.id === id);
-  if (!nl) return res.status(404).json({ ok: false, error: "Newsletter not found" });
-
-  try {
-    const sent = await sendNewsletter(nl, { manual: true });
-    if (sent) {
-      nl.lastSentAt = Date.now();
-      saveNewslettersSafe(list);
-      return res.json({ ok: true });
-    }
-    return res.status(400).json({ ok: false, error: "Nothing sent (missing SMTP, template, or recipients)" });
-  } catch (e) {
-    return res.status(500).json({ ok: false, error: String(e) });
-  }
 });
 
 // Quick sanity ping for newsletters API
@@ -473,6 +525,9 @@ app.post("/api/test-tautulli", (req, res) =>
   app._router.handle({ ...req, url: "/api/test/tautulli", method: "POST" }, res, () => {})
 );
 app.post("/api/test-email", async (req, res) => {
+  // This route now handles BOTH: (1) SMTP verify/test and (2) a real send
+  // when the body includes html/text (so "Send Now" calls that hit this
+  // endpoint won't accidentally fire the plain test email).
   const merged = { ...CONFIG };
   if (req.body && typeof req.body === "object") {
     merged.smtpHost = req.body.smtpHost ?? merged.smtpHost;
@@ -485,8 +540,70 @@ app.post("/api/test-email", async (req, res) => {
   try {
     if (!merged.smtpHost || !merged.smtpPort) throw new Error("Missing SMTP server/port");
     if (!merged.fromAddress) throw new Error("Missing From Address");
+
     const transport = nodemailer.createTransport(smtpTransportOptions(merged));
     await transport.verify();
+
+    // If the request includes newsletter content, treat this as a real send.
+    const hasHtml = typeof req.body?.html === "string" && req.body.html.trim().length > 0;
+    const hasText = typeof req.body?.text === "string" && req.body.text.trim().length > 0;
+
+    if (hasHtml || hasText) {
+      const normalizeList = (v) =>
+        (Array.isArray(v) ? v : (typeof v === "string" ? v.split(",") : []))
+          .map((s) => String(s || "").trim().toLowerCase())
+          .filter((s) => isEmail(s));
+
+      let toList = normalizeList(req.body.to);
+      let bccList = normalizeList(req.body.bcc);
+
+      // Fallback to recipients.json -> BCC everyone if no explicit recipients provided
+      if (toList.length === 0 && bccList.length === 0) {
+        const saved = loadRecipientsSafe();
+        bccList = saved
+          .map((r) => String(r.email || "").trim().toLowerCase())
+          .filter((s) => isEmail(s));
+      }
+      if (toList.length === 0 && bccList.length === 0) {
+        return res.status(400).json({ ok: false, error: "No recipients found (recipients.json is empty)." });
+      }
+
+      const subject = String(req.body.subject || "Kunkflix Newsletter").trim();
+
+      // Avoid "noreply@localhost" by using a safe To header when only BCC is used.
+      const toHeader = toList.length ? toList.join(", ") : merged.fromAddress;
+
+      const msg = {
+        from: merged.fromAddress,
+        to: toHeader,
+        bcc: bccList.length ? bccList.join(", ") : undefined,
+        subject,
+        ...(hasHtml ? { html: req.body.html } : {}),
+        ...(hasText ? { text: req.body.text } : {}),
+        headers: { "X-Kunkflix-Path": "/api/test-email" },
+      };
+
+      const info = await transport.sendMail(msg);
+
+      // Persist any updated SMTP details and mark as ok
+      applyIncomingSmtp(req.body || {}, CONFIG);
+      CONFIG.lastTest.smtp = "ok";
+      saveConfig(CONFIG);
+
+      return res.json({
+        ok: true,
+        sent: true,
+        accepted: info.accepted || [],
+        rejected: info.rejected || [],
+        envelope: info.envelope || {},
+        messageId: info.messageId || null,
+        response: info.response || null,
+        toCount: toList.length,
+        bccCount: bccList.length,
+      });
+    }
+
+    // Otherwise, behave like a simple SMTP test (previous behavior)
     if (req.body && typeof req.body.to === "string" && req.body.to.length > 0) {
       await transport.sendMail({
         from: merged.fromAddress,
@@ -495,6 +612,7 @@ app.post("/api/test-email", async (req, res) => {
         text: "This is a test email confirming your SMTP settings are working.",
       });
     }
+
     applyIncomingSmtp(req.body || {}, CONFIG);
     CONFIG.lastTest.smtp = "ok";
     saveConfig(CONFIG);
@@ -584,32 +702,13 @@ async function fetchPlexJson(pathAndQuery) {
     throw new Error(`Plex HTTP ${r.status} ${r.statusText}: ${txt.slice(0, 200)}`);
   }
 
-  // Many Plex endpoints default to XML; prefer JSON when available via "Accept: application/json".
-  // Some servers still return XML; in that case we do a minimal conversion attempt.
   try {
     return JSON.parse(txt);
   } catch {
-    // Attempt to extract basic attributes from XML if JSON parse fails.
-    // This is very light-touch: we just expose the raw string so callers can skip/fallback.
     return { _rawXml: txt };
   }
 }
 
-/**
- * Get library-wide totals from Plex:
- *   - moviesTotal: total Movies across all "movie" libraries
- *   - showsTotal: total Shows across all "show" libraries
- *   - episodesTotal: total Episodes across all "show" libraries
- *
- * Strategy:
- *   1) /library/sections  -> discover sections and their 'type' (movie/show)
- *   2) For movie sections:  /library/sections/{key}/all?type=1&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *      Use MediaContainer.totalSize if present; otherwise fallback to size attribute.
- *   3) For show sections:
- *        shows:    /library/sections/{key}/all?type=2&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *        episodes: /library/sections/{key}/all?type=4&X-Plex-Container-Start=0&X-Plex-Container-Size=0
- *      Sum totals across all show sections.
- */
 async function fetchPlexLibraryTotals() {
   const safeNum = (v) => {
     const n = Number(v);
@@ -626,7 +725,6 @@ async function fetchPlexLibraryTotals() {
         type: d.type, // "movie" | "show" | others
       }));
     } else if (j && j._rawXml) {
-      // Extremely basic XML scrape for <Directory type="movie" key="x" />
       const dirMatches = [...j._rawXml.matchAll(/<Directory\b[^>]*>/g)];
       sections = dirMatches.map(m => {
         const tag = m[0];
@@ -644,10 +742,8 @@ async function fetchPlexLibraryTotals() {
   const movieSections = sections.filter(s => s.type === "movie");
   const showSections  = sections.filter(s => s.type === "show");
 
-  // Helper to read totalSize/size from a /all response (JSON or XML)
   const readTotalFromAll = (res) => {
     if (res && res.MediaContainer) {
-      // Prefer totalSize; fallback size
       const mc = res.MediaContainer;
       if (mc.totalSize != null) return safeNum(mc.totalSize);
       if (mc.size != null) return safeNum(mc.size);
@@ -659,7 +755,7 @@ async function fetchPlexLibraryTotals() {
       if (m2) return safeNum(m2[1]);
     }
     return 0;
-    };
+  };
 
   // 2) Movies total
   let moviesTotal = 0;
@@ -686,8 +782,8 @@ async function fetchPlexLibraryTotals() {
 
   return { moviesTotal, showsTotal, episodesTotal };
 }
+
 /* =============================== RENDERING ================================ */
-/** helpers to render the same tokens the client preview supports */
 function htmlEscape(s) {
   return String(s ?? "")
     .replace(/&/g, "&amp;")
@@ -704,7 +800,6 @@ function cardHtml(title, bodyHtml) {
 function li(label, value) {
   return `<li>${htmlEscape(label)} <span style="opacity:.7">— ${htmlEscape(value)}</span></li>`;
 }
-
 function formatInt(n) {
   const m = Number(n);
   return Number.isFinite(m) ? m.toLocaleString("en-US") : String(n);
@@ -720,15 +815,15 @@ function posterFrom(row) {
   const p = row?.thumbPath || row?.thumb || row?.grandparentThumb || row?.parentThumb || row?.art || row?.poster || null;
   if (!p) return null;
   if (typeof p === "string" && p.startsWith("/")) {
-    return `http://localhost:3001/api/plex/image?path=${encodeURIComponent(p)}`;
+    return absUrl(`/api/plex/image?path=${encodeURIComponent(p)}`);
   }
-  return `http://localhost:3001/api/plex/image?u=${encodeURIComponent(p)}`;
+  return absUrl(`/api/plex/image?u=${encodeURIComponent(p)}`);
 }
 function posterImg(src, alt = "", w = 36, h = 54) {
   return `<img src="${src}" alt="${htmlEscape(alt)}" style="width:${w}px;height:${h}px;object-fit:cover;border-radius:6px;margin-right:10px;border:1px solid #e5e7eb" />`;
 }
 function platformIconUrl(nameRaw = "") {
-  const base = "http://localhost:3001/assets/platforms";
+  const base = absUrl("/assets/platforms");
   const s = String(nameRaw).toLowerCase();
   if (s.includes("tvos") || s.includes("apple tv")) return `${base}/atv.png`;
   if (s.includes("android tv")) return `${base}/androidtv.png`;
@@ -749,7 +844,6 @@ function platformIconUrl(nameRaw = "") {
   if (s.includes("web")) return `${base}/web.png`;
   return `${base}/generic.png`;
 }
-
 function platformDisplayName(nameRaw = "") {
   const s = String(nameRaw).toLowerCase();
   if (s.includes("tvos") || s.includes("apple tv")) return "Apple TV";
@@ -776,11 +870,11 @@ function rowType(row) {
   return String(row?.media_type || row?.type || row?.section_type || "").toLowerCase();
 }
 
-/* -------- app.plex.tv link helpers (place ABOVE the render blocks) -------- */
+/* -------- app.plex.tv link helpers -------- */
 async function buildAppPlexHref(ratingKey) {
   if (ratingKey == null) return null;
   try {
-    const r = await fetch("http://localhost:3001/api/plex/server-id");
+    const r = await fetch(absUrl("/api/plex/server-id"));
     if (!r.ok) return null;
     const j = await r.json();
     const sid = j?.machineIdentifier;
@@ -818,7 +912,7 @@ const OWNER_REC_TOKENS = [
 /** Tautulli home summary (days lookback) */
 async function getHomeSummary(days) {
   try {
-    const r = await fetch(`http://localhost:3001/api/tautulli/summary?days=${encodeURIComponent(days)}`);
+    const r = await fetch(absUrl(`/api/tautulli/summary?days=${encodeURIComponent(days)}`));
     if (!r.ok) return null;
     return await r.json();
   } catch { return null; }
@@ -850,8 +944,8 @@ async function buildOwnerRecommendationHtml() {
       if (item) {
         const title = item.title || item.grandparentTitle || "Title";
         const year = item.year ? ` (${item.year})` : "";
-          const hrefLocal = item.webHref || item.deepLink || item.href || null;
-          const href = (await absolutizePlexHref(hrefLocal, id)) || "#";
+        const hrefLocal = item.webHref || item.deepLink || item.href || null;
+        const href = (await absolutizePlexHref(hrefLocal, id)) || "#";
         const pSrc = posterFrom(item);
         const img = pSrc ? posterImg(pSrc, title, 96, 144) : "";
         const info =
@@ -983,7 +1077,7 @@ async function renderTemplate(html, historyDays) {
               const icon = platformIconUrl(x.name);
               return `<li style="display:flex;align-items:center;gap:10px;margin:8px 0;">
                         <img src="${icon}" alt="${htmlEscape(x.name)}" width="20" height="20" style="width:20px;height:20px;object-fit:contain;border-radius:4px;border:1px solid #e5e7eb;flex-shrink:0" />
-      <span style="flex:1;min-width:0">${htmlEscape(platformDisplayName(x.name))}</span>
+                        <span style="flex:1;min-width:0">${htmlEscape(platformDisplayName(x.name))}</span>
                         <span style="opacity:.7">${x.plays} plays</span>
                       </li>`;
             })
@@ -993,77 +1087,79 @@ async function renderTemplate(html, historyDays) {
 
     out = out.replaceAll("{{CARD_POPULAR_PLATFORMS}}", cardHtml("Most Popular Streaming Platforms", body));
   }
-    // CARD_SERVER_TOTALS (Tautulli first; fallback to Plex library scan)
-    if (out.includes("{{CARD_SERVER_TOTALS}}")) {
-      const totalsSafe = homeSummary && typeof homeSummary === "object" ? (homeSummary.totals || {}) : {};
-      const moviesStreamed   = Number.isFinite(Number(totalsSafe.movies)) ? Number(totalsSafe.movies) : 0;
-      const episodesStreamed = Number.isFinite(Number(totalsSafe.episodes)) ? Number(totalsSafe.episodes) : 0;
-      const secRaw           = Number.isFinite(Number(totalsSafe.total_time_seconds)) ? Number(totalsSafe.total_time_seconds) : 0;
 
-      const hours   = Math.floor(secRaw / 3600);
-      const minutes = Math.floor((secRaw % 3600) / 60);
-      const timeStr = formatHm(hours, minutes);
+  // CARD_SERVER_TOTALS
+  if (out.includes("{{CARD_SERVER_TOTALS}}")) {
+    const totalsSafe = homeSummary && typeof homeSummary === "object" ? (homeSummary.totals || {}) : {};
+    const moviesStreamed   = Number.isFinite(Number(totalsSafe.movies)) ? Number(totalsSafe.movies) : 0;
+    const episodesStreamed = Number.isFinite(Number(totalsSafe.episodes)) ? Number(totalsSafe.episodes) : 0;
+    const secRaw           = Number.isFinite(Number(totalsSafe.total_time_seconds)) ? Number(totalsSafe.total_time_seconds) : 0;
 
-      // Try to extract library totals from Tautulli blocks
-      let moviesTotal = null, showsTotal = null, episodesTotal = null;
-      const blocksLocal = Array.isArray(homeSummary?.home) ? homeSummary.home : [];
-      const coerceNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
-      const readMaybe = (obj, keys) => { for (const k of keys) { if (obj && obj[k] != null) { const n = coerceNum(obj[k]); if (n != null) return n; } } return null; };
+    const hours   = Math.floor(secRaw / 3600);
+    const minutes = Math.floor((secRaw % 3600) / 60);
+    const timeStr = formatHm(hours, minutes);
 
-      for (const b of blocksLocal) {
-        const rows = Array.isArray(b?.rows) ? b.rows : [];
-        for (const r of rows) {
-          if (moviesTotal   == null) moviesTotal   = readMaybe(r, ["total_movies", "movies", "movie_count", "count_movies"]);
-          if (showsTotal    == null) showsTotal    = readMaybe(r, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
-          if (episodesTotal == null) episodesTotal = readMaybe(r, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
-        }
+    // Try to extract library totals from Tautulli blocks
+    let moviesTotal = null, showsTotal = null, episodesTotal = null;
+    const blocksLocal = Array.isArray(homeSummary?.home) ? homeSummary.home : [];
+    const coerceNum = (v) => { const n = Number(v); return Number.isFinite(n) ? n : null; };
+    const readMaybe = (obj, keys) => { for (const k of keys) { if (obj && obj[k] != null) { const n = coerceNum(obj[k]); if (n != null) return n; } } return null; };
+
+    for (const b of blocksLocal) {
+      const rows = Array.isArray(b?.rows) ? b.rows : [];
+      for (const r of rows) {
+        if (moviesTotal   == null) moviesTotal   = readMaybe(r, ["total_movies", "movies", "movie_count", "count_movies"]);
+        if (showsTotal    == null) showsTotal    = readMaybe(r, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
+        if (episodesTotal == null) episodesTotal = readMaybe(r, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
       }
-      if (moviesTotal == null || showsTotal == null || episodesTotal == null) {
-        for (const b of blocksLocal) {
-          if (moviesTotal   == null) moviesTotal   = readMaybe(b, ["total_movies", "movies", "movie_count", "count_movies"]);
-          if (showsTotal    == null) showsTotal    = readMaybe(b, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
-          if (episodesTotal == null) episodesTotal = readMaybe(b, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
-        }
-      }
-
-      // Fallback to Plex if any are missing or zero
-      if (!(moviesTotal > 0 && showsTotal > 0 && episodesTotal > 0)) {
-        try {
-          const plexTotals = await fetchPlexLibraryTotals();
-          if (moviesTotal   == null || moviesTotal   === 0) moviesTotal   = plexTotals.moviesTotal;
-          if (showsTotal    == null || showsTotal    === 0) showsTotal    = plexTotals.showsTotal;
-          if (episodesTotal == null || episodesTotal === 0) episodesTotal = plexTotals.episodesTotal;
-        } catch {}
-      }
-
-      // Final safety
-      moviesTotal   = moviesTotal   ?? 0;
-      showsTotal    = showsTotal    ?? 0;
-      episodesTotal = episodesTotal ?? 0;
-
-      const ds = ` (Last ${days} Days)`;
-      const body = `
-        <ul style="margin:0;padding-left:18px">
-          ${li("🎬 Movies Streamed" + ds, formatInt(moviesStreamed))}
-          ${li("📺 TV Episodes Streamed" + ds, formatInt(episodesStreamed))}
-          ${li("🕰️ Time Streamed" + ds, timeStr)}
-        </ul>
-        <hr style="border:none;border-top:1px solid #e5e7eb;margin:8px 0" />
-        <ul style="margin:0;padding-left:18px">
-          ${li("🎥 Movies (Entire Library)", formatInt(moviesTotal))}
-          ${li("📺 TV Series (Entire Library)", formatInt(showsTotal))}
-          ${li("🎞️ TV Episodes (Entire Library)", formatInt(episodesTotal))}
-        </ul>`;
-
-      out = out.replaceAll("{{CARD_SERVER_TOTALS}}", cardHtml("Plex Media Server Totals", body));
     }
-  // RECENT MOVIES (with links + descriptions)
+    if (moviesTotal == null || showsTotal == null || episodesTotal == null) {
+      for (const b of blocksLocal) {
+        if (moviesTotal   == null) moviesTotal   = readMaybe(b, ["total_movies", "movies", "movie_count", "count_movies"]);
+        if (showsTotal    == null) showsTotal    = readMaybe(b, ["total_tv_shows", "tv_shows", "shows", "show_count", "count_shows"]);
+        if (episodesTotal == null) episodesTotal = readMaybe(b, ["total_episodes", "episodes", "episode_count", "count_episodes"]);
+      }
+    }
+
+    // Fallback to Plex if any are missing or zero
+    if (!(moviesTotal > 0 && showsTotal > 0 && episodesTotal > 0)) {
+      try {
+        const plexTotals = await fetchPlexLibraryTotals();
+        if (moviesTotal   == null || moviesTotal   === 0) moviesTotal   = plexTotals.moviesTotal;
+        if (showsTotal    == null || showsTotal    === 0) showsTotal    = plexTotals.showsTotal;
+        if (episodesTotal == null || episodesTotal === 0) episodesTotal = plexTotals.episodesTotal;
+      } catch {}
+    }
+
+    // Final safety
+    moviesTotal   = moviesTotal   ?? 0;
+    showsTotal    = showsTotal    ?? 0;
+    episodesTotal = episodesTotal ?? 0;
+
+    const ds = ` (Last ${days} Days)`;
+    const body = `
+      <ul style="margin:0;padding-left:18px">
+        ${li("🎬 Movies Streamed" + ds, formatInt(moviesStreamed))}
+        ${li("📺 TV Episodes Streamed" + ds, formatInt(episodesStreamed))}
+        ${li("🕰️ Time Streamed" + ds, timeStr)}
+      </ul>
+      <hr style="border:none;border-top:1px solid #e5e7eb;margin:8px 0" />
+      <ul style="margin:0;padding-left:18px">
+        ${li("🎥 Movies (Entire Library)", formatInt(moviesTotal))}
+        ${li("📺 TV Series (Entire Library)", formatInt(showsTotal))}
+        ${li("🎞️ TV Episodes (Entire Library)", formatInt(episodesTotal))}
+      </ul>`;
+
+    out = out.replaceAll("{{CARD_SERVER_TOTALS}}", cardHtml("Plex Media Server Totals", body));
+  }
+
+  // RECENT MOVIES
   if (out.includes("{{CARD_RECENT_MOVIES}}")) {
     const daysLocal = Math.max(1, Number(historyDays || CONFIG.lookbackDays || 7));
     let rows = [];
     try {
       const r = await fetch(
-        `http://localhost:3001/api/tautulli/recent?type=movie&days=${encodeURIComponent(daysLocal)}&limit=20`
+        absUrl(`/api/tautulli/recent?type=movie&days=${encodeURIComponent(daysLocal)}&limit=20`)
       );
       if (r.ok) {
         const j = await r.json();
@@ -1084,7 +1180,7 @@ async function renderTemplate(html, historyDays) {
       baseItems.map(async (it) => {
         if ((!it.href || !it.summary) && it.id != null) {
           try {
-            const rr = await fetch(`http://localhost:3001/api/plex/item/${encodeURIComponent(String(it.id))}`);
+            const rr = await fetch(absUrl(`/api/plex/item/${encodeURIComponent(String(it.id))}`));
             if (rr.ok) {
               const jj = await rr.json().catch(() => null);
               const item = jj?.item;
@@ -1132,11 +1228,10 @@ async function renderTemplate(html, historyDays) {
   if (out.includes("{{CARD_RECENT_EPISODES}}")) {
     const daysLocal = Math.max(1, Number(historyDays || CONFIG.lookbackDays || 7));
 
-    // 1) fetch recent episodes
     let rows = [];
     try {
       const r = await fetch(
-        `http://localhost:3001/api/tautulli/recent?type=episode&days=${encodeURIComponent(daysLocal)}&limit=50`
+        absUrl(`/api/tautulli/recent?type=episode&days=${encodeURIComponent(daysLocal)}&limit=50`)
       );
       if (r.ok) {
         const j = await r.json();
@@ -1144,22 +1239,19 @@ async function renderTemplate(html, historyDays) {
       }
     } catch {}
 
-    // helpers for numbers
     const toIntOrNull = (v) => {
       const n = parseInt(v, 10);
       return Number.isFinite(n) ? n : null;
     };
 
-    // 2) group by series (grandparent), ignoring Jeopardy!
     const bySeries = new Map();
     for (const r of rows) {
       const seriesTitleRaw = String(r?.grandparent_title || r?.title || "Series").trim();
-      if (/^jeopardy!?$/i.test(seriesTitleRaw)) continue; // skip Jeopardy! variants
+      if (/^jeopardy!?$/i.test(seriesTitleRaw)) continue;
 
       const year = r?.grandparent_year || r?.year || null;
       const seriesKey = `${seriesTitleRaw}::${year || ""}`;
 
-      // Series poster (not episode)
       const poster = posterFrom({
         grandparentThumb: r?.grandparent_thumb || r?.grandparentThumb,
         poster: r?.grandparent_poster || r?.poster || null,
@@ -1195,7 +1287,6 @@ async function renderTemplate(html, historyDays) {
       });
     }
 
-    // absolutize episode links
     const seriesList = [...bySeries.values()];
     await Promise.all(
       seriesList.map(async (s) => {
@@ -1358,7 +1449,11 @@ async function sendNewsletter(nl, { manual = false } = {}) {
   const historyDays = typeof nl.historyDays === "number" ? nl.historyDays : CONFIG.lookbackDays || 7;
   const builtHtml = await renderTemplate(rawHtml, historyDays);
 
-  const subject = `Newsletter: ${nl.name || "Untitled"}`;
+  // >>> Subject uses newsletter.subject if present <<<
+  const subject = (typeof nl.subject === "string" && nl.subject.trim())
+    ? nl.subject.trim()
+    : `Newsletter: ${nl.name || "Untitled"}`;
+
   const fromAddr = CONFIG.fromAddress || CONFIG.smtpUser;
   if (!fromAddr) {
     console.error("[send] missing fromAddress in config");
@@ -1379,7 +1474,6 @@ async function sendNewsletter(nl, { manual = false } = {}) {
     subject,
     html: `
       <div style="font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5">
-        <div style="margin-bottom:16px;opacity:.7">${manual ? "Manual send" : "Scheduled send"} • ${new Date().toLocaleString()}</div>
         ${builtHtml}
       </div>`,
   });
@@ -1387,11 +1481,6 @@ async function sendNewsletter(nl, { manual = false } = {}) {
   console.log("[send] ok:", info.messageId);
   return true;
 }
-
-/* -------------------------- Newsletters: quick ping ------------------------ */
-app.get("/api/newsletters/__ping", (_req, res) => {
-  res.json({ ok: true, msg: "newsletters API is alive" });
-});
 
 /* ----------------------- Newsletters: send-now (POST) ---------------------- */
 app.post("/api/newsletters/:id/send-now", async (req, res) => {
@@ -1406,50 +1495,81 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       });
     }
 
+    // Load this newsletter so we can default recipients/subject/content from it
+    const newsletters = loadNewslettersSafe();
+    const nl = newsletters.find((x) => x.id === id) || {};
+
     const normalizeList = (v) =>
       (Array.isArray(v) ? v : (typeof v === "string" ? v.split(",") : []))
         .map((s) => String(s || "").trim().toLowerCase())
         .filter((s) => isEmail(s));
 
+    // 1) Recipients: prefer explicit body, then newsletter.recipients; **NO** global fallback
     let toList = normalizeList(body.to);
     let bccList = normalizeList(body.bcc);
 
     if (toList.length === 0 && bccList.length === 0) {
-      const saved = loadRecipientsSafe();
-      bccList = saved
-        .map((r) => String(r.email || "").trim().toLowerCase())
-        .filter((s) => isEmail(s));
-    }
-    if (toList.length === 0 && bccList.length === 0) {
-      return res.status(400).json({ ok: false, error: "No recipients found (recipients.json is empty)." });
+      const fromNl = Array.isArray(nl.recipients) ? nl.recipients : [];
+      toList = fromNl
+        .map((e) => String(e || "").trim().toLowerCase())
+        .filter((e) => isEmail(e));
     }
 
-    const subject = String(body.subject || "Kunkflix Newsletter").trim();
-    const hasHtml = typeof body.html === "string" && body.html.trim().length > 0;
-    const hasText = typeof body.text === "string" && body.text.trim().length > 0;
-    if (!hasHtml && !hasText) {
-      return res.status(400).json({ ok: false, error: "Provide `html` and/or `text` in the body." });
+    if (toList.length === 0 && bccList.length === 0) {
+      return res.status(400).json({ ok: false, error: "No recipients selected for this newsletter." });
+    }
+
+    // 2) Subject: body.subject > nl.subject > fallback
+    const subject = String(body.subject || nl.subject || `Newsletter: ${nl.name || "Untitled"}`).trim();
+
+    // 3) Content selection:
+    //    - Default: ALWAYS render from the newsletter's template
+    //    - If you explicitly want to send raw HTML/text, set body.raw === true
+    const useRaw = body.raw === true || body.mode === "raw";
+
+    const hasHtmlBody = typeof body.html === "string" && body.html.trim().length > 0;
+    const hasTextBody = typeof body.text === "string" && body.text.trim().length > 0;
+
+    let html;
+    let text;
+
+    if (useRaw && (hasHtmlBody || hasTextBody)) {
+      html = hasHtmlBody ? body.html : undefined;
+      text = hasTextBody ? body.text : undefined;
+    } else {
+      const templates = loadTemplatesSafe();
+      const tpl = nl && nl.templateId ? templates.find((t) => t.id === nl.templateId) : null;
+      const rawHtml = tpl?.html || "<div style='opacity:.7'>No template selected.</div>";
+      const historyDays = typeof nl?.historyDays === "number" ? nl.historyDays : CONFIG.lookbackDays || 7;
+      const builtHtml = await renderTemplate(rawHtml, historyDays);
+      html = `
+        <div style="font-family:system-ui,Segoe UI,Roboto,Helvetica,Arial,sans-serif;font-size:14px;line-height:1.5">
+          ${builtHtml}
+        </div>`;
     }
 
     const transport = nodemailer.createTransport(smtpTransportOptions(CONFIG));
     try { await transport.verify(); }
     catch (e) { return res.status(400).json({ ok: false, error: `SMTP verification failed: ${e?.message || e}` }); }
 
+    // Safe To header: if only BCC, use configured From address
+    const toHeader = toList.length ? toList.join(", ") : CONFIG.fromAddress;
+
     const msg = {
       from: CONFIG.fromAddress,
-      to: toList.length ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
+      to: toHeader,
       bcc: bccList.length ? bccList.join(", ") : undefined,
       subject,
-      ...(hasHtml ? { html: body.html } : {}),
-      ...(hasText ? { text: body.text } : {}),
-      headers: { "X-Kunkflix-Newsletter-ID": id },
+      ...(html ? { html } : {}),
+      ...(text ? { text } : {}),
+      headers: { "X-Kunkflix-Newsletter-ID": id, "X-Kunkflix-Mode": useRaw ? "raw" : "template" },
     };
 
     if (body.dryRun) {
       return res.json({
         ok: true,
         dryRun: true,
-        summary: { id, toCount: toList.length, bccCount: bccList.length, subject, hasHtml, hasText },
+        summary: { id, toCount: toList.length, bccCount: bccList.length, subject, mode: useRaw ? "raw" : "template" },
       });
     }
 
@@ -1464,6 +1584,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
       response: info.response || null,
       toCount: toList.length,
       bccCount: bccList.length,
+      mode: useRaw ? "raw" : "template",
     });
   } catch (e) {
     console.error("[send-now] error:", e);
@@ -1474,7 +1595,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
 /* --------------------------------- start ---------------------------------- */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`API listening on http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
   console.log(`config.json -> ${CONFIG_PATH}`);
   console.log(`recipients.json -> ${RECIPIENTS_PATH}`);
   console.log(`emailtemplates.json -> ${TEMPLATES_PATH}`);

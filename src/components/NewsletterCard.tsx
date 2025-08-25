@@ -1,6 +1,8 @@
 // src/components/NewsletterCard.tsx
 import React, { useEffect, useMemo, useState } from "react";
+
 import { sendNewsletterNow } from "../api";
+import { API_BASE } from "../api";
 
 
 /** ----------------------------- Types & helpers ----------------------------- */
@@ -21,6 +23,7 @@ type Schedule = {
 type Newsletter = {
   id: string;
   name: string;
+  subject?: string; // email subject line for this newsletter
   description?: string;
   schedule?: Schedule | null;
   historyDays?: number; // lookback window for this newsletter (default from /api/config)
@@ -50,7 +53,7 @@ async function safeJson<T>(p: Promise<Response>): Promise<T> {
 const store = {
   async list(): Promise<Newsletter[]> {
     try {
-      return await safeJson<Newsletter[]>(fetch("http://localhost:3001/api/newsletters"));
+      return await safeJson<Newsletter[]>(fetch(`${API_BASE}/api/newsletters`));
     } catch {
       const raw = localStorage.getItem(STORAGE_KEY);
       const arr = raw ? (JSON.parse(raw) as Newsletter[]) : [];
@@ -60,7 +63,7 @@ const store = {
   async saveAll(list: Newsletter[]): Promise<void> {
     try {
       await safeJson<{ ok: boolean }>(
-        fetch("http://localhost:3001/api/newsletters", {
+        fetch(`${API_BASE}/api/newsletters`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(list),
@@ -72,7 +75,7 @@ const store = {
   },
   async remove(id: string): Promise<void> {
     try {
-      await safeJson<{ ok: boolean }>(fetch(`http://localhost:3001/api/newsletters/${encodeURIComponent(id)}`, { method: "DELETE" }));
+      await safeJson<{ ok: boolean }>(fetch(`${API_BASE}/api/newsletters/${encodeURIComponent(id)}`, { method: "DELETE" }));
     } catch {
       // local fallback
       const raw = localStorage.getItem(STORAGE_KEY);
@@ -86,7 +89,7 @@ const store = {
 /** fetch templates from server; no local fallback needed (UI handles empty) */
 async function fetchTemplates(): Promise<Template[]> {
   try {
-    const list = await safeJson<any>(fetch("http://localhost:3001/api/templates"));
+    const list = await safeJson<any>(fetch(`${API_BASE}/api/templates`));
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
@@ -95,7 +98,7 @@ async function fetchTemplates(): Promise<Template[]> {
 
 async function fetchRecipients(): Promise<Recipient[]> {
   try {
-    const list = await safeJson<any>(fetch("http://localhost:3001/api/recipients"));
+    const list = await safeJson<any>(fetch(`${API_BASE}/api/recipients`));
     return Array.isArray(list) ? list : [];
   } catch {
     return [];
@@ -104,7 +107,7 @@ async function fetchRecipients(): Promise<Recipient[]> {
 
 async function fetchConfig(): Promise<any> {
   try {
-    return await safeJson<any>(fetch("http://localhost:3001/api/config"));
+    return await safeJson<any>(fetch(`${API_BASE}/api/config`));
   } catch {
     return { lookbackDays: 7 };
   }
@@ -218,6 +221,7 @@ export default function NewsletterCard() {
     setDraft({
       id: newId(),
       name: "",
+      subject: "",
       description: "",
       schedule: {
         mode: "standard",
@@ -349,7 +353,7 @@ export default function NewsletterCard() {
     if (!n.id) return;
     setSendingId(n.id);
     try {
-      const resp = await sendNewsletterNow(n.id);
+      const resp = await sendNewsletterNow(n.id, { subject: n.subject || "" });
       if ((resp as any)?.ok) {
         // reflect lastSentAt immediately; server also persists
         const next = list.map((x) =>
@@ -505,7 +509,7 @@ export default function NewsletterCard() {
                     </div>
                   </label>
 
-                  {/* (Optional) description editor remains available in modal */}
+                  {/* Description field first */}
                   <label className="form-control md:col-span-2">
                     <div className="label"><span className="label-text">Description</span></div>
                     <textarea
@@ -515,6 +519,25 @@ export default function NewsletterCard() {
                       onChange={(e) => setDraft({ ...draft, description: e.target.value })}
                       placeholder="Brief details about this newsletter"
                     />
+                    <div className="label">
+                      <span className="label-text-alt">A brief description of what is in the Newsletter</span>
+                    </div>
+                  </label>
+
+                  {/* Subject field after Description */}
+                  <label className="form-control md:col-span-2">
+                    <div className="label"><span className="label-text">Email Subject</span></div>
+                    <input
+                      className="input input-bordered"
+                      value={draft.subject || ""}
+                      onChange={(e) => setDraft({ ...draft, subject: e.target.value })}
+                      placeholder="e.g., New this week on Plex 📺"
+                    />
+                    <div className="label">
+                      <span className="label-text-alt">
+                        If Subject is left empty, the “Description” above will be the subject line when sent.
+                      </span>
+                    </div>
                   </label>
 
                   {/* Inline Scheduler */}

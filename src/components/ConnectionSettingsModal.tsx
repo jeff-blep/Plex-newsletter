@@ -249,16 +249,13 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
 
             {/* Row 4: Buttons under TLS/SSL | Send Test To */}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-              <div className="grid grid-cols-2 gap-2">
+              <div>
                 <button
                   className={`btn ${testing === "smtp" ? "btn-disabled" : "btn-primary"}`}
                   onClick={() => handleTest("smtp")}
-                  disabled={testing === "smtp"}
+                  disabled={testing === "smtp" || !sendTestTo}
                 >
                   {testing === "smtp" ? "Testing…" : "Test SMTP"}
-                </button>
-                <button className="btn btn-secondary" onClick={handleSendTestEmail}>
-                  Send Test Email
                 </button>
               </div>
 
@@ -277,7 +274,7 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               <input
                 className="input input-bordered w-full"
-                placeholder="Plex URL (http://10.0.1.2:32400)"
+                placeholder="Plex URL (http://your-plex-host:32400)"
                 value={plexUrl}
                 onChange={(e) => setPlexUrl(e.target.value)}
               />
@@ -308,7 +305,7 @@ export default function ConnectionSettingsModal({ isOpen, onClose, onSaved }: Pr
             <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
               <input
                 className="input input-bordered w-full"
-                placeholder="Tautulli URL (http://10.0.1.2:8181)"
+                placeholder="Tautulli URL (http://your-tautulli-host:8181)"
                 value={tautulliUrl}
                 onChange={(e) => setTautulliUrl(e.target.value)}
               />

@@ -3,7 +3,7 @@
 type SMTPEnc = "TLS/SSL" | "STARTTLS" | "None";
 
 // Point straight at the API in dev; use relative in prod builds.
-const API_BASE = import.meta.env.DEV ? "http://localhost:3001" : "";
+export const API_BASE = import.meta.env.DEV ? "http://localhost:3001" : "";
 
 function api(path: string) {
   return `${API_BASE}${path}`;
@@ -253,19 +253,27 @@ export async function getTautulliLibrariesTable() {
 }
 
 // at bottom of src/api.ts (or near other newsletter helpers)
-export async function sendNewsletterNow(newsletterId: string) {
+export async function sendNewsletterNow(newsletterId: string, opts?: { subject?: string }) {
   if (!newsletterId) throw new Error("Missing newsletter id");
+
+  // Preserve existing payload shape; only override subject if caller provides one.
+  const payload: Record<string, any> = {
+    html: "<p>Test send from Kunkflix Newsletter.</p>",
+    // If you want to validate without sending, uncomment:
+    // dryRun: true,
+    // If you want to override recipients instead of using recipients.json:
+    // to: "you@example.com",
+    // bcc: ["a@example.com","b@example.com"],
+  };
+  if (opts?.subject && opts.subject.trim()) {
+    payload.subject = opts.subject.trim();
+  } else {
+    payload.subject = "Kunkflix Newsletter"; // fallback for legacy behavior
+  }
+
   return j(`/api/newsletters/${encodeURIComponent(newsletterId)}/send-now`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      subject: "Kunkflix Newsletter",
-      html: "<p>Test send from Kunkflix Newsletter.</p>",
-      // If you want to validate without sending, uncomment:
-      // dryRun: true,
-      // If you want to override recipients instead of using recipients.json:
-      // to: "you@example.com",
-      // bcc: ["a@example.com","b@example.com"],
-    }),
+    body: JSON.stringify(payload),
   });
 }

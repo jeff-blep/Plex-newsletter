@@ -361,7 +361,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
     // --- 5) Prepare message
     const msg = {
       from: CONFIG.fromAddress,
-      to: toList.length > 0 ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
+      to: toList.length > 0 ? toList.join(", ") : "Undisclosed Recipients",
       bcc: bccList.length > 0 ? bccList.join(", ") : undefined,
       subject,
       ...(hasHtml ? { html: body.html } : {}),
@@ -399,7 +399,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
 /* --------------------------------- start ---------------------------------- */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`API listening on http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
   console.log(`config.json -> ${CONFIG_PATH}`);
   console.log(`recipients.json -> ${RECIPIENTS_PATH}`);
 });
