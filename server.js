@@ -266,7 +266,7 @@ app.post("/api/test-email", async (req, res) => {
     if (req.body && typeof req.body.to === "string" && req.body.to.length > 0) {
       await transport.sendMail({
         from: merged.fromAddress, to: req.body.to,
-        subject: "Kunkflix Newsletter SMTP Test",
+        subject: "Newzlettr SMTP Test",
         text: "This is a test email confirming your SMTP settings are working.",
       });
     }
@@ -283,7 +283,7 @@ app.post("/api/test/smtp", (req, res) =>
  * POST /api/newsletters/:id/send-now
  * Body (flexible; all optional except content):
  * {
- *   subject?: string,               // default: "Kunkflix Newsletter"
+ *   subject?: string,               // default: "Newsletter"
  *   html?: string,                  // preferred; raw HTML of the email
  *   text?: string,                  // fallback text if no html
  *   to?: string[] | string,         // override recipients; can be a single string or array
@@ -334,7 +334,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
     }
 
     // --- 3) Build content
-    const subject = String(body.subject || "Kunkflix Newsletter").trim();
+    const subject = String(body.subject || "Newsletter").trim();
     const hasHtml = typeof body.html === "string" && body.html.trim().length > 0;
     const hasText = typeof body.text === "string" && body.text.trim().length > 0;
 
@@ -361,12 +361,12 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
     // --- 5) Prepare message
     const msg = {
       from: CONFIG.fromAddress,
-      to: toList.length > 0 ? toList.join(", ") : "Undisclosed recipients <noreply@localhost>",
+      to: toList.length > 0 ? toList.join(", ") : "Undisclosed Recipients",
       bcc: bccList.length > 0 ? bccList.join(", ") : undefined,
       subject,
       ...(hasHtml ? { html: body.html } : {}),
       ...(hasText ? { text: body.text } : {}),
-      headers: { "X-Kunkflix-Newsletter-ID": id },
+      headers: { "X-Newzlettr-Newsletter-ID": id },
     };
 
     // --- 6) Dry run / send
@@ -399,7 +399,7 @@ app.post("/api/newsletters/:id/send-now", async (req, res) => {
 /* --------------------------------- start ---------------------------------- */
 const PORT = process.env.PORT || 3001;
 app.listen(PORT, () => {
-  console.log(`API listening on http://localhost:${PORT}`);
+  console.log(`API listening on port ${PORT}`);
   console.log(`config.json -> ${CONFIG_PATH}`);
   console.log(`recipients.json -> ${RECIPIENTS_PATH}`);
 });

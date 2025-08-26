@@ -73,23 +73,20 @@ export default function HistoryCard({ onDaysChange }: Props) {
         <div className="mt-2 p-2 rounded bg-red-500/15 text-red-700 text-sm">{error}</div>
       )}
 
-      <div className="mt-3 grid grid-cols-[1fr_auto] gap-2 items-center">
+      <div className="mt-3 join">
         <input
           type="number"
           min={1}
           max={90}
-          className="input input-bordered w-full"
+          className="input input-bordered w-24 join-item"
           value={days}
           onChange={(e) => setDays(Math.max(1, Math.min(90, Number(e.target.value) || 1)))}
         />
-        <button className="btn btn-primary" onClick={save} disabled={saving}>
+        <button className="btn btn-primary join-item" onClick={save} disabled={saving}>
           {saving ? "Saving…" : "Save"}
         </button>
       </div>
 
-      <div className="mt-2 text-xs opacity-70">
-        Current: last <span className="font-semibold">{days}</span> day{days === 1 ? "" : "s"}
-      </div>
     </>
   );
 }

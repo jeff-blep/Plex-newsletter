@@ -1,4 +1,6 @@
 // src/lib/previewTokens.ts
+import { API_BASE } from "../api";
+
 const OWNER_REC_TOKENS = [
   "{{CARD_OWNER_RECOMMENDATION}}",
   "{{CARD_HOST_RECOMMENDATION}}",
@@ -46,9 +48,9 @@ function posterFrom(row: any): string | null {
     null;
   if (!p) return null;
   if (typeof p === "string" && p.startsWith("/")) {
-    return `http://localhost:3001/api/plex/image?path=${encodeURIComponent(p)}`;
+    return `${API_BASE}/api/plex/image?path=${encodeURIComponent(p)}`;
   }
-  return `http://localhost:3001/api/plex/image?u=${encodeURIComponent(p)}`;
+  return `${API_BASE}/api/plex/image?u=${encodeURIComponent(p)}`;
 }
 
 function posterImg(src: string, alt = "", w = 96, h = 144) {
@@ -58,9 +60,9 @@ function posterImg(src: string, alt = "", w = 96, h = 144) {
 /** Try to get a Plex server machineIdentifier from a few endpoints. */
 async function getPlexServerId(): Promise<string | null> {
   const tries = [
-    "http://localhost:3001/api/plex/server-id",
-    "http://localhost:3001/api/plex/server",
-    "http://localhost:3001/api/plex/servers",
+    `${API_BASE}/api/plex/server-id`,
+    `${API_BASE}/api/plex/server`,
+    `${API_BASE}/api/plex/servers`,
   ];
   for (const url of tries) {
     try {
@@ -102,7 +104,7 @@ async function buildOwnerRecommendationPreviewHtml(): Promise<string> {
   // Pull persisted config
   let cfg: any = {};
   try {
-    const r = await fetch("http://localhost:3001/api/config");
+    const r = await fetch(`${API_BASE}/api/config`);
     if (r.ok) cfg = await r.json();
   } catch {}
 
@@ -117,7 +119,7 @@ async function buildOwnerRecommendationPreviewHtml(): Promise<string> {
 
   // Fetch Plex item for poster + title + app link
   try {
-    const r = await fetch(`http://localhost:3001/api/plex/item/${encodeURIComponent(String(id))}`);
+    const r = await fetch(`${API_BASE}/api/plex/item/${encodeURIComponent(String(id))}`);
     if (r.ok) {
       const j = await r.json();
       const item = j?.item || j || null;
@@ -146,14 +148,14 @@ async function buildServerTotalsPreviewHtml(): Promise<string> {
   // Get lookbackDays to keep the UI consistent if you display any ranges elsewhere
   let cfg: any = {};
   try {
-    const r = await fetch("http://localhost:3001/api/config");
+    const r = await fetch(`${API_BASE}/api/config`);
     if (r.ok) cfg = await r.json();
   } catch {}
   const days = Math.max(1, Number(cfg?.lookbackDays || 7));
 
   let summary: any = null;
   try {
-    const r = await fetch(`http://localhost:3001/api/tautulli/summary?days=${encodeURIComponent(days)}`);
+    const r = await fetch(`${API_BASE}/api/tautulli/summary?days=${encodeURIComponent(days)}`);
     if (r.ok) summary = await r.json();
   } catch {}
 

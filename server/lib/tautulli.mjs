@@ -1,4 +1,4 @@
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import { UndiciAgent, fetch as undiciFetch } from "undici";
 import path from "path";
 import url from "url";
@@ -6,12 +6,16 @@ import url from "url";
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 
 function loadConfig() {
-  // same place your other server code reads from
-  const cfgPath = path.resolve(__dirname, "../../config/config.json");
+  // Single source of truth: server/config.json
+  const cfgPath = path.resolve(__dirname, "../config.json");
   try {
+    if (!existsSync(cfgPath)) return {};
     const raw = readFileSync(cfgPath, "utf8");
     const cfg = JSON.parse(raw || "{}");
-    return cfg?.tautulli || {};
+    // Support both nested and flat shapes
+    const url = cfg?.tautulli?.url || cfg?.tautulliUrl || cfg?.tautulli?.baseUrl || cfg?.tautulli?.host || "";
+    const apiKey = cfg?.tautulli?.apiKey || cfg?.tautulliApiKey || "";
+    return { url, apiKey };
   } catch {
     return {};
   }
@@ -26,7 +30,7 @@ export async function tCall(cmd, params = {}) {
   const { url: baseUrl, apiKey } = loadConfig();
 
   if (!baseUrl || !apiKey) {
-    const e = new Error("Tautulli not configured (need tautulli.url and tautulli.apiKey in /config/config.json).");
+    const e = new Error("Tautulli not configured (need tautulli.url and tautulli.apiKey in server/config.json).");
     e.code = "TAUTULLI_MISCONFIGURED";
     throw e;
   }

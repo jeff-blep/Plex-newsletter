@@ -147,13 +147,14 @@ router.get("/_debug", async (_req, res) => {
   }
 });
 
-router.get("/", async (req, res) => {
+// Clean passthrough: GET /api/tautulli/passthrough?cmd=<tautulli_cmd>&...
+router.get("/passthrough", async (req, res) => {
   try {
     const tcfg = await readTautulliConfig();
     const { cmd, ...rest } = req.query || {};
     if (!cmd) return res.status(400).json({ error: "Missing ?cmd=" });
     const data = await tautulliFetch(String(cmd), rest, tcfg);
-    res.json({ data });
+    res.json(data); // send raw Tautulli data, no wrapping
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }

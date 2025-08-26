@@ -25,4 +25,39 @@ dist-ssr
 
 # ignore stray configs
 /server/config.json
-/server/config/*.json
+.env
+.env.local
+.env.*.local
+
+# 🔒 Local runtime/state files — do not commit
+server/config.json
+server/recipients.json
+server/newsletters.json
+server/emailtemplates.json
+server/cloudinary_urls.json
+
+# Logs & debug output
+*.log
+*.err
+*.out
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Node modules & caches
+node_modules/
+.pnpm/
+.vite/
+.cache/
+
+# OS / editor noise
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Lock files if you don’t want them in repo
+package-lock.json
+pnpm-lock.yaml
+yarn.lock

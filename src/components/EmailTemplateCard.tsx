@@ -1,5 +1,6 @@
 // src/components/EmailTemplateCard.tsx
 import React, { useEffect, useRef, useState } from "react";
+import { API_BASE } from "../api";
 
 type Props = {
   config: any;
@@ -9,8 +10,7 @@ type Props = {
 const DEFAULT_TEMPLATE = ``;
 
 const TEMPLATE_TOKENS: { key: string; label: string }[] = [
-  { key: "{{CARD_STREAMING_DATA}}", label: "Streaming Data" },
-  { key: "{{CARD_SERVER_TOTALS}}", label: "Plex Media Server Totals" },
+  { key: "{{CARD_SERVER_TOTALS}}", label: "Plex Media Server Data" },
   { key: "{{CARD_MOST_WATCHED_MOVIES}}", label: "Most Watched Movies" },
   { key: "{{CARD_MOST_WATCHED_SHOWS}}", label: "Most Watched TV Shows" },
   { key: "{{CARD_MOST_WATCHED_EPISODES}}", label: "Most Watched Episodes" },
@@ -53,9 +53,9 @@ function posterFrom(row: any): string | null {
   const p = row?.thumbPath || row?.thumb || row?.grandparentThumb || row?.parentThumb || row?.art || row?.poster || null;
   if (!p) return null;
   if (typeof p === "string" && p.startsWith("/")) {
-    return `http://localhost:3001/api/plex/image?path=${encodeURIComponent(p)}`;
+    return `${API_BASE}/api/plex/image?path=${encodeURIComponent(p)}`;
   }
-  return `http://localhost:3001/api/plex/image?u=${encodeURIComponent(p)}`;
+  return `${API_BASE}/api/plex/image?u=${encodeURIComponent(p)}`;
 }
 function posterImg(src: string, alt = "", w = 36, h = 54) {
   return `<img src="${src}" alt="${htmlEscape(alt)}" style="width:${w}px;height:${h}px;object-fit:cover;border-radius:6px;margin-right:10px;border:1px solid #e5e7eb" />`;
@@ -134,7 +134,7 @@ let CACHED_PLEX_MACHINE_ID: string | null | undefined = undefined;
 async function getPlexMachineId(): Promise<string | null> {
   if (CACHED_PLEX_MACHINE_ID !== undefined) return CACHED_PLEX_MACHINE_ID;
   try {
-    const r = await fetch("http://localhost:3001/api/plex/server-id");
+    const r = await fetch(`${API_BASE}/api/plex/server-id`);
     if (!r.ok) throw new Error("server-id not ok");
     const j = await r.json();
     CACHED_PLEX_MACHINE_ID = j?.machineIdentifier || null;
@@ -185,7 +185,7 @@ function normalizePlexId(idLike: unknown): string | null {
 async function fetchOwnerRecFromServer(): Promise<{ plexItemId?: string; note?: string } | null> {
   // Try /api/config (your Settings source), then a dedicated endpoint if present
   try {
-    const r = await fetch("http://localhost:3001/api/config");
+    const r = await fetch(`${API_BASE}/api/config`);
     if (r.ok) {
       const j = await r.json();
       const rec = j?.ownerRecommendation || j?.owner_rec || null;
@@ -196,7 +196,7 @@ async function fetchOwnerRecFromServer(): Promise<{ plexItemId?: string; note?: 
     }
   } catch {/* ignore */}
   try {
-    const r2 = await fetch("http://localhost:3001/api/owner-recommendation");
+    const r2 = await fetch(`${API_BASE}/api/owner-recommendation`);
     if (r2.ok) {
       const j2 = await r2.json();
       const plexItemId = normalizePlexId(j2?.plexItemId ?? j2?.id ?? j2?.ratingKey ?? j2?.key);
@@ -215,7 +215,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
   const editorRef = useRef<HTMLDivElement | null>(null);
 
   // Track current template meta for inline header display
-  const [currentTemplate, setCurrentTemplate] = useState<{ name?: string; historyDays?: number } | null>(null);
+  const [currentTemplate, setCurrentTemplate] = useState<{ name?: string } | null>(null);
 
   // caret/selection memory for snippet insertion
   const savedRangeRef = useRef<Range | null>(null);
@@ -251,7 +251,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
   async function loadHomeSummary() {
     try {
       setHomeLoading(true);
-      const r = await fetch(`http://localhost:3001/api/tautulli/summary?days=${encodeURIComponent(historyDaysForPreview)}`);
+      const r = await fetch(`${API_BASE}/api/tautulli/summary?days=${encodeURIComponent(historyDaysForPreview)}`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const j = await r.json();
       setHomeSummary(j);
@@ -338,15 +338,13 @@ export default function EmailTemplateCard({ config, save }: Props) {
   const [templates, setTemplates] = useState<SavedTemplate[]>([]);
   const [tplError, setTplError] = useState<string | null>(null);
   const [newTemplateName, setNewTemplateName] = useState("");
-  const [historyDaysForTemplate, setHistoryDaysForTemplate] = useState<number>(() =>
-    Math.max(1, Math.min(90, Number(config?.lookbackDays || 7)))
-  );
+  // Removed historyDaysForTemplate state
 
   async function fetchTemplates() {
     try {
       setTemplatesLoading(true);
       setTplError(null);
-      const r = await fetch("http://localhost:3001/api/templates");
+      const r = await fetch(`${API_BASE}/api/templates`);
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       const list: SavedTemplate[] = await r.json();
       const arr = Array.isArray(list) ? list : [];
@@ -367,23 +365,21 @@ export default function EmailTemplateCard({ config, save }: Props) {
 
   function openNameModal() {
     setNewTemplateName("");
-    setHistoryDaysForTemplate(Math.max(1, Math.min(90, Number(config?.lookbackDays || 7))));
     setNameModalOpen(true);
   }
 
   async function saveTemplateToLibrary() {
     const name = newTemplateName.trim();
     if (!name) return;
-    const hd = Math.max(1, Math.min(90, Math.floor(Number(historyDaysForTemplate) || 7)));
     try {
       setTemplateSaving(true);
-      const r = await fetch("http://localhost:3001/api/templates", {
+      const r = await fetch(`${API_BASE}/api/templates`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name, html: templateHtml, historyDays: hd }),
+        body: JSON.stringify({ name, html: templateHtml }),
       });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
-      setCurrentTemplate({ name, historyDays: hd });
+      setCurrentTemplate({ name });
       setNameModalOpen(false);
       fetchTemplates();
     } catch (e) {
@@ -396,7 +392,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
 
   function loadTemplate(t: SavedTemplate) {
     setTemplateHtml(String(t?.html || ""));
-    setCurrentTemplate({ name: t?.name, historyDays: t?.historyDays });
+    setCurrentTemplate({ name: t?.name });
     setTemplatesModalOpen(false);
   }
 
@@ -404,7 +400,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
     const ok = confirm(`Delete template “${t.name}”? This cannot be undone.`);
     if (!ok) return;
     try {
-      const r = await fetch(`http://localhost:3001/api/templates/${encodeURIComponent(t.id)}`, { method: "DELETE" });
+      const r = await fetch(`${API_BASE}/api/templates/${encodeURIComponent(t.id)}`, { method: "DELETE" });
       if (!r.ok) throw new Error(`HTTP ${r.status}`);
       fetchTemplates();
       if (currentTemplate?.name && currentTemplate.name === t.name) {
@@ -452,9 +448,9 @@ export default function EmailTemplateCard({ config, save }: Props) {
 
     // 2) try alternative endpoints if your backend exposes them
     const altEndpoints = [
-      "http://localhost:3001/api/tautulli/server-totals",
-      "http://localhost:3001/api/tautulli/library-totals",
-      "http://localhost:3001/api/tautulli/library_counts",
+      `${API_BASE}/api/tautulli/server-totals`,
+      `${API_BASE}/api/tautulli/library-totals`,
+      `${API_BASE}/api/tautulli/library_counts`,
     ];
     for (const url of altEndpoints) {
       try {
@@ -502,7 +498,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
 
       try {
         if (candId) {
-          const r = await fetch(`http://localhost:3001/api/plex/item/${encodeURIComponent(String(candId))}`);
+          const r = await fetch(`${API_BASE}/api/plex/item/${encodeURIComponent(String(candId))}`);
           if (r.ok) {
             const j = await r.json();
             const item = j?.item || j || null;
@@ -792,12 +788,11 @@ export default function EmailTemplateCard({ config, save }: Props) {
     <div className="card bg-base-100 shadow">
       <div className="card-body">
         <div className="flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <h2 className="card-title">Email Template</h2>
-            {typeof currentTemplate?.historyDays === "number" ? (
-              <span className="text-sm opacity-70" title={currentTemplate?.name ? `Template: ${currentTemplate.name}` : undefined}>
-                • {currentTemplate.historyDays}d
-              </span>
+          <div className="flex items-center gap-2 min-h-[1.25rem]">
+            {currentTemplate?.name ? (
+              <>
+                <h2 className="card-title">{currentTemplate.name} Template</h2>
+              </>
             ) : null}
           </div>
           <div className="join">
@@ -905,7 +900,6 @@ export default function EmailTemplateCard({ config, save }: Props) {
                               <div className="truncate font-medium">{t.name}</div>
                               <div className="opacity-60 text-xs">
                                 {t.updatedAt ? new Date(t.updatedAt).toLocaleString() : ""}
-                                {typeof t.historyDays === "number" ? ` • ${t.historyDays}d` : ""}
                               </div>
                             </div>
                             <div className="flex items-center gap-2 flex-shrink-0">
@@ -961,23 +955,7 @@ export default function EmailTemplateCard({ config, save }: Props) {
                   />
                 </label>
 
-                <label className="form-control mt-3">
-                  <div className="label">
-                    <span className="label-text">History (days)</span>
-                    <span className="label-text-alt">1–90 • defaults to Settings</span>
-                  </div>
-                  <input
-                    type="number"
-                    min={1}
-                    max={90}
-                    className="input input-bordered"
-                    value={historyDaysForTemplate}
-                    onChange={(e) => {
-                      const v = Math.max(1, Math.min(90, Math.floor(Number(e.target.value) || 1)));
-                      setHistoryDaysForTemplate(v);
-                    }}
-                  />
-                </label>
+
 
                 <div className="mt-4 flex items-center justify-end gap-2">
                   <button className="btn btn-ghost" onClick={() => setNameModalOpen(false)}>Cancel</button>

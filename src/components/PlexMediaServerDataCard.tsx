@@ -167,7 +167,7 @@ function thumbUrl(row: any): string | null {
   return `/api/plex/image?path=${encodeURIComponent(p)}`;
 }
 
-export default function PlexMediaServerDataCard({ days = 7 }: { days?: number }) {
+export default function PlexMediaServerDataCard({ days = 0 }: { days?: number }) {
   // NEW: effective lookback window (defaults to prop, then loads from config, and listens to updates)
   const [effectiveDays, setEffectiveDays] = useState<number>(days);
 
@@ -178,6 +178,8 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
   const [libTotals, setLibTotals] = useState<{ movies: number; series: number; episodes: number }>({
     movies: 0, series: 0, episodes: 0,
   });
+  // Home stats passthrough for most-watched blocks
+  const [homeStats, setHomeStats] = useState<HomeBlock[]>([]);
 
   // Load lookbackDays from config on mount
   useEffect(() => {
@@ -216,21 +218,70 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
     // Summary for selected window
     fetch(`/api/tautulli/summary?days=${encodeURIComponent(effectiveDays)}`)
       .then(r => {
+        if (r.status === 404) {
+          // Treat as disabled (no Tautulli router mounted)
+          return { disabled: true } as any;
+        }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
-      .then((j: Summary) => {
-        if (!cancelled) setSummary(j);
+      .then((j: Summary & { disabled?: boolean }) => {
+        if (cancelled) return;
+        if ((j as any)?.disabled) {
+          setSummary({
+            home: [],
+            totals: { movies: 0, episodes: 0, total_plays: 0, total_time_seconds: 0 },
+          });
+        } else {
+          setSummary(j || { home: [], totals: { movies: 0, episodes: 0, total_plays: 0, total_time_seconds: 0 } });
+        }
       })
-      .catch(e => !cancelled && setErr(e?.message || String(e)))
-      .finally(() => !cancelled && setLoading(false));
+      .catch(e => {
+        if (cancelled) return;
+        // Keep UI calm: show zeros on any error without the red banner
+        setSummary({ home: [], totals: { movies: 0, episodes: 0, total_plays: 0, total_time_seconds: 0 } });
+        // Optional: comment out the line below if you want to hide the top alert entirely
+        // setErr(e?.message || String(e));
+      })
+      .finally(() => { if (!cancelled) setLoading(false); });
+
+    // Home stats passthrough for selected window
+    fetch(`/api/tautulli/passthrough?cmd=get_home_stats&time_range=${encodeURIComponent(effectiveDays)}`)
+      .then(r => {
+        if (r.status === 404) return { disabled: true } as any;
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then((j: any) => {
+        if (cancelled) return;
+        if ((j as any)?.disabled) {
+          setHomeStats([]);
+        } else {
+          setHomeStats(Array.isArray(j) ? j : []);
+        }
+      })
+      .catch(e => {
+        if (cancelled) return;
+        console.warn("[PlexMediaServerDataCard] home_stats passthrough failed:", e);
+        setHomeStats([]);
+      });
 
     // Library counts
     (async () => {
       try {
         const r = await fetch(`/api/tautulli?cmd=get_libraries_table`);
+        if (r.status === 404) {
+          if (!cancelled) setLibTotals({ movies: 0, series: 0, episodes: 0 });
+          return;
+        }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const j = await r.json();
+
+        // Disabled guard: some backends respond with { disabled: true }
+        if ((j as any)?.disabled) {
+          if (!cancelled) setLibTotals({ movies: 0, series: 0, episodes: 0 });
+          return;
+        }
 
         // Ground-truth shape is { data: { data: [...] } }
         const rows: any[] = Array.isArray(j?.data?.data) ? j.data.data : [];
@@ -248,6 +299,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         if (!cancelled) setLibTotals({ movies, series, episodes });
       } catch (e) {
         console.warn("[PlexMediaServerDataCard] libraries_table fetch failed:", e);
+        if (!cancelled) setLibTotals({ movies: 0, series: 0, episodes: 0 });
       }
     })();
 
@@ -255,16 +307,16 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
   }, [effectiveDays]);
 
   const rowsMovies = useMemo(
-    () => pickHomeRows(summary?.home, ["top_movies", "most_watched_movies"]).slice(0, 6),
-    [summary]
+    () => pickHomeRows(homeStats, ["top_movies", "most_watched_movies"]).slice(0, 6),
+    [homeStats]
   );
   const rowsShows = useMemo(
-    () => pickHomeRows(summary?.home, ["top_tv", "most_watched_tv_shows", "most_watched_tv"]).slice(0, 6),
-    [summary]
+    () => pickHomeRows(homeStats, ["top_tv", "most_watched_tv_shows", "most_watched_tv"]).slice(0, 6),
+    [homeStats]
   );
   const rowsPlatforms = useMemo(
-    () => pickHomeRows(summary?.home, ["top_platforms", "most_used_platforms", "top_clients"]).slice(0, 6),
-    [summary]
+    () => pickHomeRows(homeStats, ["top_platforms", "most_used_platforms", "top_clients"]).slice(0, 6),
+    [homeStats]
   );
 
   const moviesCols = useMemo(() => splitTwo(rowsMovies), [rowsMovies]);
@@ -273,10 +325,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between min-h-6">
-        <div className="text-sm opacity-70">
-          Window: last <b>{effectiveDays}</b> day{effectiveDays === 1 ? "" : "s"}
-        </div>
+      <div className="flex items-center justify-end min-h-6">
         {loading ? <span className="loading loading-spinner loading-sm" /> : null}
       </div>
 
@@ -286,6 +335,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       )}
 
+      <h2 className="text-lg font-semibold">Plex Media Server Totals</h2>
       {/* Library totals */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">
@@ -302,6 +352,7 @@ export default function PlexMediaServerDataCard({ days = 7 }: { days?: number })
         </div>
       </div>
 
+      <h2 className="text-lg font-semibold">Set History Totals</h2>
       {/* Summary strip */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
         <div className="rounded-xl px-4 py-3 bg-base-200/50">

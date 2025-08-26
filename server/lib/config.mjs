@@ -4,8 +4,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const CONFIG_DIR = path.resolve(__dirname, "../config");
-const CONFIG_FILE = path.join(CONFIG_DIR, "config.json");
+const CONFIG_FILE = path.resolve(__dirname, "../config.json");
 
 /** Safely read config JSON (returns {} if missing/invalid). */
 async function readJsonSafe() {
@@ -24,7 +23,6 @@ export async function getConfig() {
 
 /** Shallow-merge and save top-level keys; return updated config. */
 export async function saveConfig(partial) {
-  await mkdir(CONFIG_DIR, { recursive: true });
   const current = await readJsonSafe();
   const next = { ...current, ...partial };
   await writeFile(CONFIG_FILE, JSON.stringify(next, null, 2));

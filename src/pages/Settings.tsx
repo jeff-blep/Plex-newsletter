@@ -145,7 +145,7 @@ export default function Settings() {
               className="input input-bordered"
               value={plexUrl}
               onChange={(e) => setPlexUrl(e.target.value)}
-              placeholder="http://10.0.1.2:32400"
+              placeholder="http://your-plex-host:32400"
             />
           </label>
           <label className="flex flex-col">
@@ -186,7 +186,7 @@ export default function Settings() {
               className="input input-bordered"
               value={tautulliUrl}
               onChange={(e) => setTautulliUrl(e.target.value)}
-              placeholder="http://10.0.1.2:8181"
+              placeholder="http://your-tautulli-host:8181"
             />
           </label>
           <label className="flex flex-col">

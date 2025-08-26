@@ -3,7 +3,7 @@
 type SMTPEnc = "TLS/SSL" | "STARTTLS" | "None";
 
 // Point straight at the API in dev; use relative in prod builds.
-const API_BASE = import.meta.env.DEV ? "http://localhost:3001" : "";
+export const API_BASE = import.meta.env.DEV ? "http://localhost:3001" : "";
 
 function api(path: string) {
   return `${API_BASE}${path}`;
@@ -41,25 +41,8 @@ export type OwnerRecommendation = {
 };
 
 export async function getConfig() {
-  const data = await j<any>("/api/config");
-  return {
-    plexUrl: data.plexUrl || "",
-    plexToken: data.plexToken || "",
-    tautulliUrl: data.tautulliUrl || "",
-    tautulliApiKey: data.tautulliApiKey || "",
-
-    fromAddress: data.fromAddress || "",
-    smtpEmailLogin: data.smtpUser || "",
-    // never return password to UI
-    smtpServer: data.smtpHost || "",
-    smtpPort: typeof data.smtpPort === "number" ? data.smtpPort : 587,
-    smtpEncryption: toEnc(!!data.smtpSecure, data.smtpPort),
-
-    lookbackDays: typeof data.lookbackDays === "number" ? data.lookbackDays : 7,
-
-    // NEW: surface ownerRecommendation for persistence
-    ownerRecommendation: (data.ownerRecommendation ?? {}) as OwnerRecommendation,
-  };
+  // Return the server JSON as-is so callers (modal) can access imageHost/cloudinary, etc.
+  return j<any>("/api/config", { cache: "no-store" } as RequestInit);
 }
 
 // helper: remove undefined keys so we don't clobber saved config on the server
@@ -86,6 +69,14 @@ export async function postConfig(body: {
 
   lookbackDays?: number;
 
+  imageHost?: "embedded" | "cloudinary";
+  cloudinary?: {
+    cloudName?: string;
+    apiKey?: string;
+    apiSecret?: string; // send only if user typed a new one
+    folder?: string;
+  };
+
   // NEW: allow writing ownerRecommendation to server
   ownerRecommendation?: OwnerRecommendation;
 }) {
@@ -106,9 +97,19 @@ export async function postConfig(body: {
     // History lookback
     lookbackDays: body.lookbackDays,
 
-    // NEW: pass through to server (server already persists this)
-    ownerRecommendation: body.ownerRecommendation,
+    // Image hosting
+    imageHost: body.imageHost,
   });
+
+  if (body.cloudinary) {
+    const c = pruneUndefined({
+      cloudName: body.cloudinary.cloudName,
+      apiKey: body.cloudinary.apiKey,
+      apiSecret: body.cloudinary.apiSecret, // only include if provided by caller
+      folder: body.cloudinary.folder,
+    });
+    if (Object.keys(c).length > 0) serverBody.cloudinary = c;
+  }
 
   // Only send smtpPass if non-empty so we don’t clear stored value
   if (typeof body.smtpEmailPassword === "string" && body.smtpEmailPassword.length > 0) {
@@ -253,19 +254,37 @@ export async function getTautulliLibrariesTable() {
 }
 
 // at bottom of src/api.ts (or near other newsletter helpers)
-export async function sendNewsletterNow(newsletterId: string) {
+export async function sendNewsletterNow(
+  newsletterId: string,
+  opts?: { subject?: string; homeStats?: any; lookbackDays?: number }
+) {
   if (!newsletterId) throw new Error("Missing newsletter id");
+
+  // Preserve existing payload shape; only override subject if caller provides one.
+  const payload: Record<string, any> = {
+    html: "<p>Test send from Newzlettr.</p>",
+    // If you want to validate without sending, uncomment:
+    // dryRun: true,
+    // If you want to override recipients instead of using recipients.json:
+    // to: "you@example.com",
+    // bcc: ["a@example.com","b@example.com"],
+  };
+  if (opts?.subject && opts.subject.trim()) {
+    payload.subject = opts.subject.trim();
+  } else {
+    payload.subject = "Newzlettr Newsletter"; // fallback for legacy behavior
+  }
+  if (opts?.homeStats) {
+    // Pass Tautulli home_stats straight through so the server can render exactly what the card shows
+    (payload as any).homeStats = opts.homeStats;
+  }
+  if (typeof opts?.lookbackDays === 'number') {
+    (payload as any).lookbackDays = opts.lookbackDays;
+  }
+
   return j(`/api/newsletters/${encodeURIComponent(newsletterId)}/send-now`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      subject: "Kunkflix Newsletter",
-      html: "<p>Test send from Kunkflix Newsletter.</p>",
-      // If you want to validate without sending, uncomment:
-      // dryRun: true,
-      // If you want to override recipients instead of using recipients.json:
-      // to: "you@example.com",
-      // bcc: ["a@example.com","b@example.com"],
-    }),
+    body: JSON.stringify(payload),
   });
 }
