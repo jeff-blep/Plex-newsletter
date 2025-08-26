@@ -124,11 +124,37 @@ function sumForLabel(input, wantedLabel) {
 
 /* ---------- routes ---------- */
 
-router.get("/_debug", async (req, res) => {
+// Generic passthrough: GET /api/tautulli?cmd=<tautulli_cmd>&...
+router.get("/", async (req, res) => {
+  try {
+    const tcfg = await readTautulliConfig();
+    const { cmd, ...rest } = req.query || {};
+    if (!cmd) return res.status(400).json({ error: "Missing ?cmd=" });
+    const data = await tautulliFetch(String(cmd), rest, tcfg);
+    res.json({ data });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+router.get("/_debug", async (_req, res) => {
   try {
     const tcfg = await readTautulliConfig();
     const maskedKey = tcfg.apiKey ? tcfg.apiKey.slice(0, 4) + "…" + tcfg.apiKey.slice(-4) : null;
     res.json({ tautulli: { url: tcfg.url || null, sniHost: tcfg.sniHost || null, hostHeader: tcfg.hostHeader || null, apiKey: maskedKey } });
+  } catch (e) {
+    res.status(500).json({ error: String(e?.message || e) });
+  }
+});
+
+// Clean passthrough: GET /api/tautulli/passthrough?cmd=<tautulli_cmd>&...
+router.get("/passthrough", async (req, res) => {
+  try {
+    const tcfg = await readTautulliConfig();
+    const { cmd, ...rest } = req.query || {};
+    if (!cmd) return res.status(400).json({ error: "Missing ?cmd=" });
+    const data = await tautulliFetch(String(cmd), rest, tcfg);
+    res.json(data); // send raw Tautulli data, no wrapping
   } catch (e) {
     res.status(500).json({ error: String(e?.message || e) });
   }
@@ -174,8 +200,7 @@ router.get("/summary", async (req, res) => {
   }
 });
 
-/** NEW: list users with emails from Tautulli */
-router.get("/users", async (req, res) => {
+router.get("/users", async (_req, res) => {
   try {
     const tcfg = await readTautulliConfig();
     const data = await tautulliFetch("get_users", {}, tcfg);
@@ -195,6 +220,30 @@ router.get("/users", async (req, res) => {
   } catch (e) {
     console.error("GET /tautulli/users failed:", e);
     res.status(500).json({ error: "fetch failed" });
+  }
+});
+
+// NEW: GET /api/tautulli/recent?type=movie|episode&days=7&limit=12
+router.get("/recent", async (req, res) => {
+  try {
+    const tcfg = await readTautulliConfig();
+
+    const type = String(req.query.type || "").toLowerCase(); // optional: movie|episode
+    const days = Math.max(1, Math.min(90, parseInt(String(req.query.days ?? "7"), 10) || 7));
+    const limit = Math.max(1, Math.min(50, parseInt(String(req.query.limit ?? "12"), 10) || 12));
+
+    const data = await tautulliFetch("get_recently_added", { time_range: days, count: limit }, tcfg);
+    const rows = Array.isArray(data?.recently_added) ? data.recently_added : [];
+
+    const filtered = type === "movie"
+      ? rows.filter((r) => String(r?.media_type || r?.type || "").toLowerCase() === "movie")
+      : type === "episode"
+      ? rows.filter((r) => String(r?.media_type || r?.type || "").toLowerCase() === "episode")
+      : rows;
+
+    res.json({ ok: true, rows: filtered });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e?.message || e) });
   }
 });
 

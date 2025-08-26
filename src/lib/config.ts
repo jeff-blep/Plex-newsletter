@@ -10,9 +10,9 @@ export type AppConfig = Record<Keys, string | boolean>;
 
 // Note: we now use smtpMode: "starttls" | "ssl"
 const DEFAULTS: AppConfig = {
-  plexUrl: "http://10.0.1.2:32400",
+  plexUrl: "",
   plexToken: "",
-  tautulliUrl: "http://tautulli.local:8181",
+  tautulliUrl: "",
   tautulliKey: "",
   respectLibraryShares: true,
 
